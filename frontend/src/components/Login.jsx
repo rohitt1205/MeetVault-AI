@@ -3,9 +3,14 @@ import { supabase } from "../lib/supabase";
 function Login() {
 
   const handleMicrosoftLogin = async () => {
+
     await supabase.auth.signInWithOAuth({
       provider: "azure",
+      options: {
+        scopes: "openid profile email User.Read"
+      }
     });
+
   };
 
   return (
