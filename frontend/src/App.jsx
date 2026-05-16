@@ -369,17 +369,12 @@ function App() {
         .from(CHAT_HISTORY_TABLE)
 
         .insert({
-
+          user_id: session?.user?.id,
           title: historyItem.title,
-
           preview: historyItem.preview,
-
           query: historyItem.query,
-
           meeting_id: historyItem.meetingId,
-
           meeting_title: historyItem.meetingTitle,
-
         })
 
         .select('id,title,preview,query,meeting_id,meeting_title,created_at')
