@@ -5,6 +5,7 @@ from app.services.transcript_service import TranscriptService
 from app.services.embedding_service import EmbeddingService
 from app.services.chroma_service import ChromaService
 from fastapi import Query
+from app.services.ingestion_state_service import IngestionStateService
 
 router = APIRouter()
 
@@ -71,6 +72,16 @@ def mock_chunks():
 
 @router.get("/pipeline/mock")
 def full_pipeline_mock():
+    meeting_id = "meeting-001"
+
+    if IngestionStateService.is_processed(meeting_id):
+        return {
+            "message": "Meeting already processed",
+            "meeting_id": meeting_id,
+            "status": "SKIPPED"
+        }
+
+    IngestionStateService.mark_status(meeting_id, "PROCESSING")
 
     transcript = [
         {
@@ -103,10 +114,16 @@ def full_pipeline_mock():
     )
 
     result = ChromaService.store_embeddings(
-        embedded_chunks
+    embedded_chunks
     )
 
-    return result
+    IngestionStateService.mark_status(meeting_id, "EMBEDDED")
+
+    return {
+        "message": result.get("message"),
+        "meeting_id": meeting_id,
+        "status": "EMBEDDED"
+    }
 
 @router.get("/search")
 def semantic_search(query: str = Query(...)):
@@ -134,3 +151,13 @@ def semantic_search(query: str = Query(...)):
         "query": query,
         "results": response
     }
+
+@router.get("/ingestion/status/{meeting_id}")
+def get_ingestion_status(meeting_id: str):
+
+    return IngestionStateService.get_status(meeting_id)
+
+@router.get("/ingestion/status")
+def get_all_ingestion_statuses():
+
+    return IngestionStateService.get_all_statuses()
