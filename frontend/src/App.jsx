@@ -245,7 +245,7 @@ function App() {
 
       if (historyInsertError) {
         console.error('History insert failed:', historyInsertError)
-        setHistoryError('This chat is only saved locally until history storage is ready.')
+        setHistoryError(`DB Error: ${historyInsertError.message || historyInsertError.details || 'Unknown error'}`)
       } else {
         const persistedHistory = mapHistoryRow(savedHistory)
 
