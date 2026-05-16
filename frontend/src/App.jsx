@@ -3,6 +3,7 @@ import { supabase } from './lib/supabase'
 import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const CHAT_HISTORY_TABLE = 'chat_history'
 
 const initialMeetings = [
   {
@@ -31,24 +32,6 @@ const initialMeetings = [
   },
 ]
 
-const initialHistory = [
-  {
-    id: 'h-1',
-    title: 'Find action items from sync',
-    preview: 'Asked about pending backend tasks',
-  },
-  {
-    id: 'h-2',
-    title: 'Summarize Graph API meeting',
-    preview: 'Pulled context from latest transcripts',
-  },
-  {
-    id: 'h-3',
-    title: 'Check ChromaDB pipeline',
-    preview: 'Reviewed ingestion and vector search',
-  },
-]
-
 const mcpServers = [
   {
     id: 'jira',
@@ -70,6 +53,16 @@ const mcpServers = [
   },
 ]
 
+const mapHistoryRow = (row) => ({
+  id: row.id,
+  title: row.title,
+  preview: row.preview || (row.meeting_title ? `Context: ${row.meeting_title}` : ''),
+  query: row.query,
+  meetingId: row.meeting_id,
+  meetingTitle: row.meeting_title,
+  createdAt: row.created_at,
+})
+
 function App() {
   const [session, setSession] = useState(undefined)
   const [showSettings, setShowSettings] = useState(false)
@@ -78,13 +71,20 @@ function App() {
   const [theme, setTheme] = useState('light')
   const [query, setQuery] = useState('')
   const [isSearching, setIsSearching] = useState(false)
-  const [history, setHistory] = useState(initialHistory)
-  const [activeHistoryId, setActiveHistoryId] = useState(initialHistory[0].id)
+
+  const [history, setHistory] = useState([])
+  const [activeHistoryId, setActiveHistoryId] = useState('')
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+
   const [meetings, setMeetings] = useState(initialMeetings)
   const [selectedMeetingId, setSelectedMeetingId] = useState(initialMeetings[0].id)
 
-  const authToken = session?.access_token || ''
+  const graphToken = session?.provider_token || ''
+  const supabaseToken = session?.access_token || ''
+  const authToken = graphToken || supabaseToken
   const user = session?.user
+  const userId = user?.id
 
   const activeHistory = useMemo(
     () => history.find((item) => item.id === activeHistoryId),
@@ -110,9 +110,10 @@ function App() {
       email: user?.email || 'No email available',
       provider: 'Azure OAuth via Supabase',
       tenant: metadata.tid || metadata.tenant_id || 'Azure workspace',
-      tokenPreview: authToken ? `${authToken.slice(0, 24)}...` : 'No token',
+      tokenType: graphToken ? 'Microsoft Graph provider token' : 'Supabase access token',
+      token: authToken || 'No token',
     }
-  }, [authToken, user])
+  }, [authToken, graphToken, user])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -132,6 +133,11 @@ function App() {
     fetchSession()
 
     const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!nextSession) {
+        setHistory([])
+        setActiveHistoryId('')
+      }
+
       setSession(nextSession)
     })
 
@@ -139,6 +145,45 @@ function App() {
       authListener.subscription.unsubscribe()
     }
   }, [])
+
+  useEffect(() => {
+    if (!userId) {
+      return
+    }
+
+    let ignore = false
+
+    const loadHistory = async () => {
+      setIsHistoryLoading(true)
+      setHistoryError('')
+
+      const { data, error } = await supabase
+        .from(CHAT_HISTORY_TABLE)
+        .select('id,title,preview,query,meeting_id,meeting_title,created_at')
+        .order('created_at', { ascending: false })
+
+      if (ignore) return
+
+      if (error) {
+        console.error('History load failed:', error)
+        setHistoryError('History could not be loaded.')
+        setHistory([])
+        setActiveHistoryId('')
+      } else {
+        const savedHistory = data.map(mapHistoryRow)
+        setHistory(savedHistory)
+        setActiveHistoryId(savedHistory[0]?.id || '')
+      }
+
+      setIsHistoryLoading(false)
+    }
+
+    loadHistory()
+
+    return () => {
+      ignore = true
+    }
+  }, [userId])
 
   const handleAuth = async () => {
     const { error } = await supabase.auth.signInWithOAuth({
@@ -156,6 +201,8 @@ function App() {
   const handleSignOut = async () => {
     await supabase.auth.signOut()
     setShowProfile(false)
+    setHistory([])
+    setActiveHistoryId('')
   }
 
   const handleSearch = async (event) => {
@@ -163,20 +210,52 @@ function App() {
 
     const trimmedQuery = query.trim()
     if (!trimmedQuery) return
+    if (!userId) {
+      setHistoryError('Please sign in again before saving chat history.')
+      return
+    }
 
     const historyItem = {
-      id: `h-${Date.now()}`,
+      id: `local-${Date.now()}`,
       title: trimmedQuery,
-      preview: selectedMeeting
-        ? `Context: ${selectedMeeting.title}`
-        : 'New agent conversation',
+      preview: selectedMeeting ? `Context: ${selectedMeeting.title}` : 'New agent conversation',
+      query: trimmedQuery,
+      meetingId: selectedMeeting?.id || null,
+      meetingTitle: selectedMeeting?.title || null,
     }
 
     setHistory((items) => [historyItem, ...items])
     setActiveHistoryId(historyItem.id)
     setIsSearching(true)
+    setHistoryError('')
 
     try {
+      const { data: savedHistory, error: historyInsertError } = await supabase
+        .from(CHAT_HISTORY_TABLE)
+        .insert({
+          user_id: userId,
+          title: historyItem.title,
+          preview: historyItem.preview,
+          query: historyItem.query,
+          meeting_id: historyItem.meetingId,
+          meeting_title: historyItem.meetingTitle,
+        })
+        .select('id,title,preview,query,meeting_id,meeting_title,created_at')
+        .single()
+
+      if (historyInsertError) {
+        console.error('History insert failed:', historyInsertError)
+        setHistoryError(`DB Error: ${historyInsertError.message || historyInsertError.details || 'Unknown error'}`)
+      } else {
+        const persistedHistory = mapHistoryRow(savedHistory)
+
+        setHistory((items) =>
+          items.map((item) => (item.id === historyItem.id ? persistedHistory : item)),
+        )
+
+        setActiveHistoryId(persistedHistory.id)
+      }
+
       const response = await fetch(
         `${API_BASE_URL}/search?query=${encodeURIComponent(trimmedQuery)}`,
         {
@@ -192,8 +271,8 @@ function App() {
       if (!response.ok) {
         throw new Error('Search request failed')
       }
-    } catch {
-      // Keep the UI quiet here. Failed backend search should not create a fake answer.
+    } catch (error) {
+      console.error(error)
     } finally {
       setIsSearching(false)
       setQuery('')
@@ -225,7 +304,8 @@ function App() {
         setMeetings(normalizedMeetings)
         setSelectedMeetingId(normalizedMeetings[0].id)
       }
-    } catch {
+    } catch (error) {
+      console.error(error)
       setMeetings(initialMeetings)
       setSelectedMeetingId(initialMeetings[0].id)
     }
@@ -264,9 +344,8 @@ function App() {
             <p className="eyebrow">Required authentication</p>
             <h2 id="login-title">Connect with Microsoft to continue</h2>
             <p>
-              MeetVault uses Supabase with Azure OAuth. After login, the session
-              token can be passed to backend routes for Graph, RAG, and
-              meeting-scoped search.
+              MeetVault uses Supabase with Azure OAuth. After login, the session token can
+              be passed to backend routes for Graph, RAG, and meeting-scoped search.
             </p>
           </div>
 
@@ -289,24 +368,45 @@ function App() {
           </div>
         </div>
 
-        <button className="new-chat-button" type="button">
+        <button
+          className="new-chat-button"
+          type="button"
+          onClick={() => {
+            setActiveHistoryId('')
+            setQuery('')
+          }}
+        >
           <span aria-hidden="true">+</span>
           New chat
         </button>
 
         <nav className="history-list" aria-label="Recent agent chats">
           <p className="sidebar-label">History</p>
-          {history.map((item) => (
-            <button
-              className={`history-item ${item.id === activeHistoryId ? 'active' : ''}`}
-              key={item.id}
-              type="button"
-              onClick={() => setActiveHistoryId(item.id)}
-            >
-              <span>{item.title}</span>
-              <small>{item.preview}</small>
-            </button>
-          ))}
+
+          {isHistoryLoading ? <p className="history-note">Loading history...</p> : null}
+
+          {!isHistoryLoading && history.length === 0 ? (
+            <p className="history-note">Your saved chats will appear here.</p>
+          ) : null}
+
+          {!isHistoryLoading
+            ? history.map((item) => (
+                <button
+                  className={`history-item ${item.id === activeHistoryId ? 'active' : ''}`}
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveHistoryId(item.id)
+                    setQuery(item.query || '')
+                  }}
+                >
+                  <span>{item.title}</span>
+                  <small>{item.preview}</small>
+                </button>
+              ))
+            : null}
+
+          {historyError ? <p className="history-note error">{historyError}</p> : null}
         </nav>
 
         <button
@@ -358,8 +458,20 @@ function App() {
                   <dd>{userProfile.tenant}</dd>
                 </div>
                 <div>
+                  <dt>Token type</dt>
+                  <dd>{userProfile.tokenType}</dd>
+                </div>
+                <div className="token-row">
                   <dt>Access token</dt>
-                  <dd>{userProfile.tokenPreview}</dd>
+                  <dd>
+                    <textarea
+                      className="token-field"
+                      value={userProfile.token}
+                      readOnly
+                      rows={6}
+                      aria-label="Complete access token"
+                    />
+                  </dd>
                 </div>
               </dl>
 
