@@ -330,6 +330,22 @@ button {
   font-size: 14px;
 }
 
+.token-row {
+  min-width: 0;
+}
+
+.token-field {
+  width: 100%;
+  min-height: 118px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-strong);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+  padding: 10px;
+}
+
 .signout-button {
   cursor: pointer;
   border: 1px solid var(--border);
@@ -721,3 +737,16 @@ button {
   }
 
 }
+
+.history-note {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.history-note.error {
+  color: #b54747;
+}
+
