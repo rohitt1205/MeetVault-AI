@@ -720,4 +720,16 @@ button {
     align-items: center;
   }
 
+  .history-note {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+ 
+.history-note.error {
+  color: #b54747;
+}
+
 }
