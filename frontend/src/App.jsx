@@ -239,8 +239,6 @@ function App() {
           query: historyItem.query,
           meeting_id: historyItem.meetingId,
           meeting_title: historyItem.meetingTitle,
-          access_token: authToken,
-          token_type: graphToken ? 'microsoft_graph_provider_token' : 'supabase_access_token',
         })
         .select('id,title,preview,query,meeting_id,meeting_title,created_at')
         .single()
