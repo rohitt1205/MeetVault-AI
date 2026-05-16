@@ -1,121 +1,525 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from './assets/vite.svg'
-import heroImg from './assets/hero.png'
+import { useEffect, useMemo, useState } from 'react'
+import { supabase } from './lib/supabase'
 import './App.css'
 
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+
+const initialMeetings = [
+  {
+    id: 'mv-101',
+    title: 'Hackathon Sync',
+    team: 'Team 6',
+    time: 'Today, 10:00 AM',
+    summary: 'Graph API integration, transcript ingestion, and RAG milestones.',
+    tags: ['Graph API', 'RAG', 'Backend'],
+  },
+  {
+    id: 'mv-102',
+    title: 'Backend Pipeline Review',
+    team: 'MeetVault AI',
+    time: 'Yesterday, 5:30 PM',
+    summary: 'Chunking strategy, embeddings, ChromaDB persistence, and search API.',
+    tags: ['ChromaDB', 'Embeddings'],
+  },
+  {
+    id: 'mv-103',
+    title: 'Product UX Notes',
+    team: 'Frontend',
+    time: 'May 15, 3:00 PM',
+    summary: 'Search-first interface, recent meetings context, and MCP settings.',
+    tags: ['UX', 'Agent Context'],
+  },
+]
+
+const initialHistory = [
+  {
+    id: 'h-1',
+    title: 'Find action items from sync',
+    preview: 'Asked about pending backend tasks',
+  },
+  {
+    id: 'h-2',
+    title: 'Summarize Graph API meeting',
+    preview: 'Pulled context from latest transcripts',
+  },
+  {
+    id: 'h-3',
+    title: 'Check ChromaDB pipeline',
+    preview: 'Reviewed ingestion and vector search',
+  },
+]
+
+const mcpServers = [
+  {
+    id: 'jira',
+    name: 'Jira',
+    status: 'Planned',
+    description: 'Map meeting action items to tickets and sprint context.',
+  },
+  {
+    id: 'graph',
+    name: 'Microsoft Graph',
+    status: 'Ready',
+    description: 'Fetch Teams meetings, transcripts, and organizer metadata.',
+  },
+  {
+    id: 'notion',
+    name: 'Notion',
+    status: 'Optional',
+    description: 'Publish meeting notes and decision logs to team pages.',
+  },
+]
+
 function App() {
-  const [count, setCount] = useState(0)
+  const [session, setSession] = useState(undefined)
+  const [showSettings, setShowSettings] = useState(false)
+  const [showProfile, setShowProfile] = useState(false)
+  const [settingsView, setSettingsView] = useState('appearance')
+  const [theme, setTheme] = useState('light')
+  const [query, setQuery] = useState('')
+  const [isSearching, setIsSearching] = useState(false)
+  const [history, setHistory] = useState(initialHistory)
+  const [activeHistoryId, setActiveHistoryId] = useState(initialHistory[0].id)
+  const [meetings, setMeetings] = useState(initialMeetings)
+  const [selectedMeetingId, setSelectedMeetingId] = useState(initialMeetings[0].id)
+
+  const authToken = session?.access_token || ''
+  const user = session?.user
+
+  const activeHistory = useMemo(
+    () => history.find((item) => item.id === activeHistoryId),
+    [activeHistoryId, history],
+  )
+
+  const selectedMeeting = useMemo(
+    () => meetings.find((meeting) => meeting.id === selectedMeetingId) || meetings[0],
+    [meetings, selectedMeetingId],
+  )
+
+  const userProfile = useMemo(() => {
+    const metadata = user?.user_metadata || {}
+    const name =
+      metadata.full_name ||
+      metadata.name ||
+      metadata.preferred_username ||
+      user?.email ||
+      'MeetVault user'
+
+    return {
+      name,
+      email: user?.email || 'No email available',
+      provider: 'Azure OAuth via Supabase',
+      tenant: metadata.tid || metadata.tenant_id || 'Azure workspace',
+      tokenPreview: authToken ? `${authToken.slice(0, 24)}...` : 'No token',
+    }
+  }, [authToken, user])
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  useEffect(() => {
+    const fetchSession = async () => {
+      const { data, error } = await supabase.auth.getSession()
+
+      if (error) {
+        console.error(error)
+      }
+
+      setSession(data.session)
+    }
+
+    fetchSession()
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession)
+    })
+
+    return () => {
+      authListener.subscription.unsubscribe()
+    }
+  }, [])
+
+  const handleAuth = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'azure',
+      options: {
+        scopes: 'openid profile email User.Read',
+      },
+    })
+
+    if (error) {
+      console.error(error)
+    }
+  }
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut()
+    setShowProfile(false)
+  }
+
+  const handleSearch = async (event) => {
+    event.preventDefault()
+
+    const trimmedQuery = query.trim()
+    if (!trimmedQuery) return
+
+    const historyItem = {
+      id: `h-${Date.now()}`,
+      title: trimmedQuery,
+      preview: selectedMeeting
+        ? `Context: ${selectedMeeting.title}`
+        : 'New agent conversation',
+    }
+
+    setHistory((items) => [historyItem, ...items])
+    setActiveHistoryId(historyItem.id)
+    setIsSearching(true)
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/search?query=${encodeURIComponent(trimmedQuery)}`,
+        {
+          headers: authToken
+            ? {
+                Authorization: `Bearer ${authToken}`,
+                'X-Meeting-Context': selectedMeeting?.id || '',
+              }
+            : undefined,
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error('Search request failed')
+      }
+    } catch {
+      // Keep the UI quiet here. Failed backend search should not create a fake answer.
+    } finally {
+      setIsSearching(false)
+      setQuery('')
+    }
+  }
+
+  const refreshLatestMeetings = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/meetings/recent`, {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+      })
+
+      if (!response.ok) {
+        throw new Error('Meeting request failed')
+      }
+
+      const data = await response.json()
+      const normalizedMeetings = data.map((meeting) => ({
+        id: meeting.meeting_id,
+        title: meeting.title,
+        team: meeting.organizer || 'Microsoft Teams',
+        time: meeting.start_time || 'Latest',
+        summary:
+          'Retrieved from Microsoft Graph. RAG topics will attach after transcript ingestion.',
+        tags: ['Graph', 'Latest'],
+      }))
+
+      if (normalizedMeetings.length > 0) {
+        setMeetings(normalizedMeetings)
+        setSelectedMeetingId(normalizedMeetings[0].id)
+      }
+    } catch {
+      setMeetings(initialMeetings)
+      setSelectedMeetingId(initialMeetings[0].id)
+    }
+  }
+
+  if (session === undefined) {
+    return (
+      <main className="login-gate">
+        <section className="login-card" aria-label="Loading MeetVault">
+          <div className="brand-block login-brand">
+            <div className="brand-mark">M</div>
+            <div>
+              <p className="eyebrow">MeetVault AI</p>
+              <h1>Checking your session</h1>
+            </div>
+          </div>
+          <p>Loading authentication state...</p>
+        </section>
+      </main>
+    )
+  }
+
+  if (!session) {
+    return (
+      <main className="login-gate">
+        <section className="login-card" aria-labelledby="login-title">
+          <div className="brand-block login-brand">
+            <div className="brand-mark">M</div>
+            <div>
+              <p className="eyebrow">MeetVault AI</p>
+              <h1>Secure meeting intelligence</h1>
+            </div>
+          </div>
+
+          <div className="login-copy">
+            <p className="eyebrow">Required authentication</p>
+            <h2 id="login-title">Connect with Microsoft to continue</h2>
+            <p>
+              MeetVault uses Supabase with Azure OAuth. After login, the session
+              token can be passed to backend routes for Graph, RAG, and
+              meeting-scoped search.
+            </p>
+          </div>
+
+          <button className="auth-button full-width" type="button" onClick={handleAuth}>
+            Continue with Microsoft
+          </button>
+        </section>
+      </main>
+    )
+  }
 
   return (
-    <>
-      <section id="center">
-        <div className="hero">
-          <img src={heroImg} className="base" width="170" height="179" alt="" />
-          <img src={reactLogo} className="framework" alt="React logo" />
-          <img src={viteLogo} className="vite" alt="Vite logo" />
+    <div className="app-shell">
+      <aside className="sidebar" aria-label="Conversation history">
+        <div className="brand-block">
+          <div className="brand-mark">M</div>
+          <div>
+            <p className="eyebrow">MeetVault AI</p>
+            <h1>Workspace</h1>
+          </div>
         </div>
-        <div>
-          <h1>Get started</h1>
-          <p>
-            Edit <code>src/App.jsx</code> and save to test <code>HMR</code>
-          </p>
-        </div>
-        <button
-          type="button"
-          className="counter"
-          onClick={() => setCount((count) => count + 1)}
-        >
-          Count is {count}
+
+        <button className="new-chat-button" type="button">
+          <span aria-hidden="true">+</span>
+          New chat
         </button>
-      </section>
 
-      <div className="ticks"></div>
+        <nav className="history-list" aria-label="Recent agent chats">
+          <p className="sidebar-label">History</p>
+          {history.map((item) => (
+            <button
+              className={`history-item ${item.id === activeHistoryId ? 'active' : ''}`}
+              key={item.id}
+              type="button"
+              onClick={() => setActiveHistoryId(item.id)}
+            >
+              <span>{item.title}</span>
+              <small>{item.preview}</small>
+            </button>
+          ))}
+        </nav>
 
-      <section id="next-steps">
-        <div id="docs">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#documentation-icon"></use>
-          </svg>
-          <h2>Documentation</h2>
-          <p>Your questions, answered</p>
-          <ul>
-            <li>
-              <a href="https://vite.dev/" target="_blank">
-                <img className="logo" src={viteLogo} alt="" />
-                Explore Vite
-              </a>
-            </li>
-            <li>
-              <a href="https://react.dev/" target="_blank">
-                <img className="button-icon" src={reactLogo} alt="" />
-                Learn more
-              </a>
-            </li>
-          </ul>
+        <button
+          className="settings-button"
+          type="button"
+          onClick={() => setShowSettings(true)}
+        >
+          Settings
+        </button>
+      </aside>
+
+      <main className="main-panel">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Internal meeting intelligence</p>
+            <h2>{activeHistory?.title || 'Ask about your meetings'}</h2>
+          </div>
+
+          <button
+            className="profile-button"
+            type="button"
+            onClick={() => setShowProfile((value) => !value)}
+            aria-label="User profile"
+            title="User profile"
+          >
+            <span className="presence-dot" aria-hidden="true"></span>
+            <span>{userProfile.name.slice(0, 2).toUpperCase()}</span>
+          </button>
+
+          {showProfile ? (
+            <section className="profile-popover" aria-label="User credentials">
+              <div className="profile-heading">
+                <div className="profile-avatar">
+                  {userProfile.name.slice(0, 2).toUpperCase()}
+                </div>
+                <div>
+                  <h3>{userProfile.name}</h3>
+                  <p>{userProfile.email}</p>
+                </div>
+              </div>
+
+              <dl className="credential-list">
+                <div>
+                  <dt>Provider</dt>
+                  <dd>{userProfile.provider}</dd>
+                </div>
+                <div>
+                  <dt>Tenant</dt>
+                  <dd>{userProfile.tenant}</dd>
+                </div>
+                <div>
+                  <dt>Access token</dt>
+                  <dd>{userProfile.tokenPreview}</dd>
+                </div>
+              </dl>
+
+              <button className="signout-button" type="button" onClick={handleSignOut}>
+                Sign out
+              </button>
+            </section>
+          ) : null}
+        </header>
+
+        <section className="ask-zone" aria-label="Ask MeetVault">
+          <div className="search-wrap">
+            <div className="context-strip">
+              <span>Context</span>
+              <strong>{selectedMeeting?.title}</strong>
+              <small>{selectedMeeting?.time}</small>
+            </div>
+            <p className="eyebrow">Ask the agent</p>
+            <form className="search-form" onSubmit={handleSearch}>
+              <textarea
+                aria-label="Ask about meeting transcripts"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Ask anything about meetings, decisions, blockers, or action items"
+                rows="3"
+              />
+              <div className="search-actions">
+                <span className="context-note">Using selected latest meeting only</span>
+                <button className="send-button" type="submit" disabled={isSearching}>
+                  {isSearching ? 'Searching' : 'Send'}
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <section className="meetings-section" aria-labelledby="meetings-title">
+            <div className="section-header">
+              <div>
+                <p className="eyebrow">Agent context</p>
+                <h3 id="meetings-title">Latest meetings</h3>
+              </div>
+              <button className="ghost-button" type="button" onClick={refreshLatestMeetings}>
+                Refresh
+              </button>
+            </div>
+
+            <div className="meeting-list">
+              {meetings.map((meeting) => (
+                <button
+                  className={`meeting-card ${
+                    meeting.id === selectedMeetingId ? 'selected' : ''
+                  }`}
+                  key={meeting.id}
+                  type="button"
+                  onClick={() => setSelectedMeetingId(meeting.id)}
+                >
+                  <div className="meeting-card-top">
+                    <div>
+                      <h4>{meeting.title}</h4>
+                      <p>{meeting.team}</p>
+                    </div>
+                    <time>{meeting.time}</time>
+                  </div>
+                  <p>{meeting.summary}</p>
+                  <div className="tag-row">
+                    {meeting.tags.map((tag) => (
+                      <span key={tag}>{tag}</span>
+                    ))}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </section>
+        </section>
+      </main>
+
+      {showSettings ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={() => setShowSettings(false)}
+        >
+          <section
+            className="settings-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="settings-title"
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <div className="modal-header">
+              <div>
+                <p className="eyebrow">Integrations</p>
+                <h3 id="settings-title">Settings</h3>
+              </div>
+              <button
+                className="icon-button"
+                type="button"
+                onClick={() => setShowSettings(false)}
+                aria-label="Close settings"
+                title="Close"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="settings-tabs" role="tablist" aria-label="Settings sections">
+              <button
+                className={settingsView === 'appearance' ? 'active' : ''}
+                type="button"
+                onClick={() => setSettingsView('appearance')}
+              >
+                Appearance
+              </button>
+              <button
+                className={settingsView === 'mcp' ? 'active' : ''}
+                type="button"
+                onClick={() => setSettingsView('mcp')}
+              >
+                MCP
+              </button>
+            </div>
+
+            {settingsView === 'appearance' ? (
+              <div className="appearance-panel">
+                <button
+                  className={theme === 'light' ? 'theme-option active' : 'theme-option'}
+                  type="button"
+                  onClick={() => setTheme('light')}
+                >
+                  <span>Light</span>
+                  <small>Clean workspace mode</small>
+                </button>
+                <button
+                  className={theme === 'dark' ? 'theme-option active' : 'theme-option'}
+                  type="button"
+                  onClick={() => setTheme('dark')}
+                >
+                  <span>Dark</span>
+                  <small>Low-light review mode</small>
+                </button>
+              </div>
+            ) : (
+              <div className="server-list">
+                {mcpServers.map((server) => (
+                  <article className="server-row" key={server.id}>
+                    <div>
+                      <h4>{server.name}</h4>
+                      <p>{server.description}</p>
+                    </div>
+                    <button className="connect-button" type="button">
+                      {server.status}
+                    </button>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
         </div>
-        <div id="social">
-          <svg className="icon" role="presentation" aria-hidden="true">
-            <use href="/icons.svg#social-icon"></use>
-          </svg>
-          <h2>Connect with us</h2>
-          <p>Join the Vite community</p>
-          <ul>
-            <li>
-              <a href="https://github.com/vitejs/vite" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#github-icon"></use>
-                </svg>
-                GitHub
-              </a>
-            </li>
-            <li>
-              <a href="https://chat.vite.dev/" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#discord-icon"></use>
-                </svg>
-                Discord
-              </a>
-            </li>
-            <li>
-              <a href="https://x.com/vite_js" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#x-icon"></use>
-                </svg>
-                X.com
-              </a>
-            </li>
-            <li>
-              <a href="https://bsky.app/profile/vite.dev" target="_blank">
-                <svg
-                  className="button-icon"
-                  role="presentation"
-                  aria-hidden="true"
-                >
-                  <use href="/icons.svg#bluesky-icon"></use>
-                </svg>
-                Bluesky
-              </a>
-            </li>
-          </ul>
-        </div>
-      </section>
-
-      <div className="ticks"></div>
-      <section id="spacer"></section>
-    </>
+      ) : null}
+    </div>
   )
 }
 
