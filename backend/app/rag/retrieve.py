@@ -3,8 +3,9 @@ from app.services.embedding_service import EmbeddingService
 from app.services.answer_service import AnswerService
 from app.rag.prompts import RAG_SYSTEM_PROMPT
 from app.rag.llm import generate_answer
+from app.mcp.mcp_manager import MCPManager
 
-def retrieve_and_answer(user_query: str, meeting_id: str | None = None) -> dict:
+def retrieve_and_answer(user_query: str, meeting_id: str | None = None, user_key: str = "demo") -> dict:
     """
     Retrieves relevant transcript chunks from ChromaDB based on the user query,
     constructs a prompt, and calls the LLM to get a grounded answer.
@@ -57,6 +58,32 @@ def retrieve_and_answer(user_query: str, meeting_id: str | None = None) -> dict:
         
     # Join retrieved chunks to form the context
     context_text = "\n\n---\n\n".join(retrieved_documents)
+    
+    # Optional: Dynamic MCP Tool Fetching for Jira
+    query_lower = user_query.lower()
+    jira_keywords = [
+        "jira",
+        "ticket",
+        "tickets",
+        "assigned",
+        "task",
+        "tasks",
+        "issue",
+        "issues",
+        "sprint"
+    ]
+    if any(keyword in query_lower for keyword in jira_keywords):
+        jira_tickets = MCPManager.get_jira_tickets(user_key)
+        if jira_tickets:
+            jira_context = "\n".join([f"[{t['ticket_id']}] {t['summary']} (Status: {t['status']})" for t in jira_tickets])
+            context_text += f"\n\n--- [LIVE JIRA TICKETS ASSIGNED TO {user_key}] ---\n{jira_context}\n"
+            # Add Jira as a visible source reference
+            sources.append({
+                "chunk_id": "mcp-jira-live",
+                "distance": 0.0,
+                "text": f"Found {len(jira_tickets)} live tickets assigned to you in Jira.",
+                "metadata": {"source": "Jira Workspace"}
+            })
     
     # 4. Construct the Prompt
     final_prompt = RAG_SYSTEM_PROMPT.format(

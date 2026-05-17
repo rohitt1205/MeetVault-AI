@@ -1,5 +1,7 @@
 import os
+from dotenv import load_dotenv
 
+load_dotenv()
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.graph_routes import router as graph_router
@@ -38,3 +40,5 @@ def home():
 
 app.include_router(graph_router)
 app.include_router(rag_router)
+from app.api.mcp_routes import router as mcp_router
+app.include_router(mcp_router)

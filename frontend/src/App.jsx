@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabase'
+import MCPPanel from './components/mcp/MCPPanel'
 import './App.css'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
@@ -930,16 +931,19 @@ function App() {
                 </button>
               </div>
             ) : (
-              <div className="server-list">
-                {mcpServers.map((server) => (
-                  <article className="server-row" key={server.id}>
-                    <div>
-                      <h4>{server.name}</h4>
-                      <p>{server.description}</p>
-                    </div>
-                    <span className="result-badge">{server.status}</span>
-                  </article>
-                ))}
+              <div className="mcp-settings-container">
+                <div className="server-list" style={{ marginBottom: '24px' }}>
+                  {mcpServers.map((server) => (
+                    <article className="server-row" key={server.id}>
+                      <div>
+                        <h4>{server.name}</h4>
+                        <p>{server.description}</p>
+                      </div>
+                      <span className="result-badge">{server.status}</span>
+                    </article>
+                  ))}
+                </div>
+                <MCPPanel token={backendToken} userEmail={user?.email} />
               </div>
             )}
           </section>
