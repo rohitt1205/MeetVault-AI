@@ -56,13 +56,26 @@ class GraphClient:
             raise HTTPException(status_code=502, detail=f"Graph request failed: {exc}") from exc
 
         if response.status_code >= 400:
+            detail = {
+                "message": "Microsoft Graph returned an error",
+                "endpoint": endpoint,
+                "response": response.text,
+            }
+
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+
+            if isinstance(payload, dict):
+                error_payload = payload.get("error", {})
+                detail["graph_code"] = error_payload.get("code")
+                detail["graph_message"] = error_payload.get("message")
+                detail["response_json"] = payload
+
             raise HTTPException(
                 status_code=response.status_code,
-                detail={
-                    "message": "Microsoft Graph returned an error",
-                    "endpoint": endpoint,
-                    "response": response.text,
-                },
+                detail=detail,
             )
 
         return response
@@ -114,6 +127,62 @@ class GraphClient:
         )
 
         return response.content
+
+    @staticmethod
+    def download_to_file(
+        endpoint: str,
+        access_token: str,
+        file_path: str,
+        params: dict | None = None,
+    ) -> dict:
+        try:
+            with requests.get(
+                url=GraphClient._url(endpoint),
+                headers=GraphClient._headers(
+                    access_token,
+                    {"Accept": "application/octet-stream"},
+                ),
+                params=params,
+                stream=True,
+                timeout=GRAPH_TIMEOUT_SECONDS,
+            ) as response:
+                if response.status_code >= 400:
+                    detail = {
+                        "message": "Microsoft Graph returned an error",
+                        "endpoint": endpoint,
+                        "response": response.text,
+                    }
+
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        payload = None
+
+                    if isinstance(payload, dict):
+                        error_payload = payload.get("error", {})
+                        detail["graph_code"] = error_payload.get("code")
+                        detail["graph_message"] = error_payload.get("message")
+                        detail["response_json"] = payload
+
+                    raise HTTPException(
+                        status_code=response.status_code,
+                        detail=detail,
+                    )
+
+                bytes_written = 0
+                with open(file_path, "wb") as output_file:
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            output_file.write(chunk)
+                            bytes_written += len(chunk)
+
+                return {
+                    "bytes_written": bytes_written,
+                    "content_type": response.headers.get("content-type"),
+                    "content_length": response.headers.get("content-length"),
+                }
+        except requests.exceptions.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Graph download failed: {exc}") from exc
 
     @staticmethod
     def post(endpoint: str, access_token: str, payload: dict) -> dict:

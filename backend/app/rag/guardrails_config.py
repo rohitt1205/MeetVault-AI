@@ -1,5 +1,13 @@
 import logging
 import re
+<<<<<<< HEAD
+
+
+logger = logging.getLogger(__name__)
+
+
+class SafetyMiddleware:
+=======
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -16,6 +24,7 @@ class SafetyMiddleware:
     """
     
     # Common prompt injection and jailbreak attack strings
+>>>>>>> origin/main
     INJECTION_PATTERNS = [
         r"ignore previous instructions",
         r"override system prompt",
@@ -26,6 +35,12 @@ class SafetyMiddleware:
         r"forget instructions",
         r"forget rules",
         r"bypass system",
+<<<<<<< HEAD
+        r"jailbreak",
+        r"ignore all rules",
+        r"always output",
+    ]
+=======
         r"hypothetical scenario",
         r"simulated environment",
         r"new role",
@@ -36,6 +51,7 @@ class SafetyMiddleware:
 
     # Anchored keywords indicating the model is stating the entire answer is unknown.
     # Anchoring prevents blocking valid answers that happen to contain phrases like "downtime is not mentioned".
+>>>>>>> origin/main
     UNAVAILABLE_PATTERNS = [
         r"^\s*i don't know",
         r"^\s*i do not know",
@@ -46,6 +62,41 @@ class SafetyMiddleware:
         r"^\s*cannot answer based on",
         r"^\s*none of the provided excerpts",
         r"^\s*i cannot answer",
+<<<<<<< HEAD
+        r"^\s*there is no mention",
+    ]
+    UNSAFE_PATTERNS = [
+        r"\bfuck\b",
+        r"\bshit\b",
+        r"\bbitch\b",
+        r"\basshole\b",
+        r"kill yourself",
+        r"hate speech",
+    ]
+
+    @classmethod
+    def validate_input(cls, query: str) -> bool:
+        query_lower = (query or "").lower()
+        for pattern in [*cls.INJECTION_PATTERNS, *cls.UNSAFE_PATTERNS]:
+            if re.search(pattern, query_lower):
+                logger.warning("Blocked unsafe or prompt-injection query: %s", pattern)
+                return False
+        return True
+
+    @classmethod
+    def validate_output(cls, text: str, context: str | None = None, query: str | None = None) -> str:
+        fallback_response = "Information not found in the provided context."
+        if not text or not text.strip():
+            return fallback_response
+
+        text_lower = text.lower()
+        for pattern in cls.UNAVAILABLE_PATTERNS:
+            if re.search(pattern, text_lower):
+                return fallback_response
+        for pattern in cls.UNSAFE_PATTERNS:
+            if re.search(pattern, text_lower):
+                logger.warning("Blocked unsafe model output: %s", pattern)
+=======
         r"^\s*there is no mention"
     ]
 
@@ -138,10 +189,21 @@ class SafetyMiddleware:
         for pattern in cls.UNSAFE_PATTERNS:
             if re.search(pattern, text_lower):
                 logger.warning("Unsafe content detected in output. Sanitizing to fallback.")
+>>>>>>> origin/main
                 return fallback_response
 
         return text.strip()
 
+<<<<<<< HEAD
+    @staticmethod
+    def sanitize_output(text: str) -> str:
+        return re.sub(
+            r"^(ANSWER:|Answer:|AI:|Assistant:)\s*",
+            "",
+            text or "",
+            flags=re.IGNORECASE,
+        ).strip()
+=======
     @classmethod
     def sanitize_output(cls, text: str) -> str:
         """
@@ -149,3 +211,4 @@ class SafetyMiddleware:
         """
         cleaned = re.sub(r"^(ANSWER:|Answer:|AI:|Assistant:)\s*", "", text, flags=re.IGNORECASE)
         return cleaned.strip()
+>>>>>>> origin/main

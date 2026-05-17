@@ -11,6 +11,10 @@ class IngestRequest(BaseModel):
     
 class QueryRequest(BaseModel):
     query: str
+<<<<<<< HEAD
+    meeting_id: str | None = None
+=======
+>>>>>>> origin/main
 
 @router.post("/ingest")
 def ingest_text(request: IngestRequest):
@@ -40,7 +44,11 @@ def query_rag(request: QueryRequest):
     Queries the RAG pipeline with a user question and returns the grounded answer.
     """
     try:
+<<<<<<< HEAD
+        result = retrieve_and_answer(request.query, meeting_id=request.meeting_id)
+=======
         result = retrieve_and_answer(request.query)
+>>>>>>> origin/main
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

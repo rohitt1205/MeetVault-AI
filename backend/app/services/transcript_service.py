@@ -9,6 +9,10 @@ TIMESTAMP_PATTERN = re.compile(
 )
 VOICE_PATTERN = re.compile(r"<v\s+([^>]+)>(.*?)</v>", re.IGNORECASE | re.DOTALL)
 TAG_PATTERN = re.compile(r"<[^>]+>")
+PLAIN_TEXT_LINE_PATTERN = re.compile(
+    r"^(?:(?P<timestamp>\d{1,2}:\d{2}:\d{2}(?:\.\d{1,3})?)\s+)?"
+    r"(?:(?P<speaker>[^:]{1,60}):\s+)?(?P<text>.+)$"
+)
 
 
 class TranscriptService:
@@ -96,7 +100,12 @@ class TranscriptService:
     @staticmethod
     def normalize_transcript(raw_transcript: list[dict] | str) -> list[dict]:
         if isinstance(raw_transcript, str):
-            raw_transcript = TranscriptService.parse_vtt(raw_transcript)
+            parsed_vtt = TranscriptService.parse_vtt(raw_transcript)
+            raw_transcript = (
+                parsed_vtt
+                if parsed_vtt
+                else TranscriptService.parse_plain_text(raw_transcript)
+            )
 
         normalized_transcript = []
 
@@ -114,6 +123,28 @@ class TranscriptService:
             })
 
         return normalized_transcript
+
+    @staticmethod
+    def parse_plain_text(raw_text: str) -> list[dict]:
+        entries = []
+
+        for raw_line in raw_text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            match = PLAIN_TEXT_LINE_PATTERN.match(line)
+            if not match:
+                continue
+
+            entries.append({
+                "speaker": (match.group("speaker") or "Unknown").strip(),
+                "timestamp": match.group("timestamp"),
+                "end_timestamp": None,
+                "text": match.group("text").strip(),
+            })
+
+        return entries
 
     @staticmethod
     def transcript_to_text(transcript: list[dict]) -> str:
