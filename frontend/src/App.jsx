@@ -9,6 +9,16 @@ const STATUS_POLL_MS = 5000
 const REQUIRED_LOGIN_SCOPES =
   'openid profile email offline_access User.Read Calendars.Read Files.Read OnlineMeetings.Read OnlineMeetingTranscript.Read.All'
 const THEME_STORAGE_KEY = 'meetvault-theme'
+const FALLBACK_TOPIC_CARDS = [
+  'Latest recording summary',
+  'Decisions',
+  'Action items',
+  'Blockers',
+  'LWC Training',
+  'MuleSoft',
+  'Sales Assistant Agent',
+  'Integration Training',
+]
 
 const mcpServers = [
   {
@@ -90,6 +100,7 @@ function App() {
   const [isSearching, setIsSearching] = useState(false)
   const [conversationTurns, setConversationTurns] = useState([])
   const [activeConversationRecordId, setActiveConversationRecordId] = useState('')
+  const [selectedTopicContext, setSelectedTopicContext] = useState(null)
   const [searchMessage, setSearchMessage] = useState('')
   const [pipelineNotice, setPipelineNotice] = useState('')
   const [historyError, setHistoryError] = useState('')
@@ -299,6 +310,36 @@ function App() {
     (left, right) => right[1] - left[1],
   )
   const hasConversation = conversationTurns.length > 0
+  const embeddedTopicCards = useMemo(() => {
+    const topics = []
+    const seen = new Set()
+    const addTopic = (title, meetingId = null) => {
+      const normalized = (title || '').trim()
+      if (!normalized || normalized.length < 3) return
+
+      const key = normalized.toLowerCase()
+      if (seen.has(key)) return
+
+      seen.add(key)
+      topics.push({
+        id: meetingId || key,
+        title: normalized.replace(/\.(mp4|webm|m4a|mp3|wav|vtt|txt)$/i, ''),
+        meetingId,
+      })
+    }
+
+    sortedIngestionStatuses
+      .filter((status) => status.status === 'EMBEDDED')
+      .forEach((status) => addTopic(status.meeting_title || status.original_filename, status.meeting_id))
+
+    ;(vectorStoreStatus?.sample_chunks || []).forEach((chunk) =>
+      addTopic(chunk.meeting_title, chunk.meeting_id),
+    )
+
+    FALLBACK_TOPIC_CARDS.forEach((title) => addTopic(title))
+
+    return topics.slice(0, 8)
+  }, [sortedIngestionStatuses, vectorStoreStatus])
   const pipelineSummary = useMemo(() => {
     const collectionName = vectorStoreStatus?.collection_name || 'meetvault_transcripts'
     const latestChunkCount =
@@ -489,7 +530,7 @@ function App() {
         )
         if (payload.llm_error) {
           setPipelineNotice(
-            'The answer model is unavailable right now, so MeetVault is showing a grounded retrieval-based fallback answer.',
+            'The answer model is unavailable right now. Start Ollama/Qwen to generate a full RAG answer.',
           )
         }
 
@@ -498,12 +539,7 @@ function App() {
           return
         }
 
-        const preview =
-          payload.answer_mode === 'gemini'
-            ? 'RAG answer'
-            : payload.answer_mode === 'extractive_summary'
-              ? 'Fallback summary'
-              : 'Workspace retrieval'
+        const preview = payload.answer_mode === 'rag_answer' ? 'RAG answer' : 'Workspace retrieval'
         const meeting_id = results[0]?.metadata?.meeting_id || null
         const meeting_title = results[0]?.metadata?.meeting_title || null
 
@@ -547,72 +583,82 @@ function App() {
           .select('id,title,preview,query,meeting_id,meeting_title,created_at')
           .single()
 
-      if (historyInsertError) {
-        console.error('History insert failed:', historyInsertError)
-        setHistoryError('This chat is only saved locally until history storage is ready.')
-      } else {
-        const persistedHistory = mapHistoryRow(savedHistory)
+        if (error) {
+          console.error('History insert failed:', error)
+          setHistoryError('This chat is only saved locally until history storage is ready.')
+          return
+        }
 
-        setHistory((items) =>
-          items.map((item) => (item.id === historyItem.id ? persistedHistory : item)),
-        )
-
-        setActiveHistoryId(persistedHistory.id)
+        const savedHistoryItem = mapHistoryRow(data)
+        setHistory((items) => [savedHistoryItem, ...items])
+        setActiveHistoryId(savedHistoryItem.id)
+        setActiveConversationRecordId(savedHistoryItem.id)
+      } catch (error) {
+        console.error(error)
+        setSearchMessage(error.message || 'Search request failed.')
+      } finally {
+        setIsSearching(false)
+        setQuery('')
       }
+    },
+    [activeConversationRecordId, userId],
+  )
 
-      const response = await fetch(
-        `${API_BASE_URL}/search?query=${encodeURIComponent(trimmedQuery)}`,
-        {
-          headers: authToken
-            ? {
-                Authorization: `Bearer ${authToken}`,
-                'X-Meeting-Context': selectedMeeting?.id || '',
-              }
-            : undefined,
-        },
-      )
-
-      if (!response.ok) {
-        throw new Error('Search request failed')
-      }
-    } catch (error) {
-      console.error(error)
-    } finally {
-      setIsSearching(false)
-      setQuery('')
-    }
+  const handleSearch = (event) => {
+    event.preventDefault()
+    executeSearch(query, {
+      meetingId: selectedTopicContext?.meetingId || null,
+    })
   }
 
-  const refreshLatestMeetings = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/meetings/recent`, {
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
-      })
+  const handleTopicSelect = (topic) => {
+    setSelectedTopicContext(topic)
+    setSearchMessage(`Context selected: ${topic.title}`)
+  }
 
-      if (!response.ok) {
-        throw new Error('Meeting request failed')
-      }
+  const handleReset = () => {
+    setQuery('')
+    setConversationTurns([])
+    setActiveConversationRecordId('')
+    setActiveHistoryId('')
+    setSelectedTopicContext(null)
+    setSearchMessage('')
+    setPipelineNotice('')
+    setHistoryError('')
+  }
 
-      const data = await response.json()
-      const normalizedMeetings = data.map((meeting) => ({
-        id: meeting.meeting_id,
-        title: meeting.title,
-        team: meeting.organizer || 'Microsoft Teams',
-        time: meeting.start_time || 'Latest',
-        summary:
-          'Retrieved from Microsoft Graph. RAG topics will attach after transcript ingestion.',
-        tags: ['Graph', 'Latest'],
-      }))
+  const handleHistorySelect = (item) => {
+    setActiveHistoryId(item.id)
+    setActiveConversationRecordId(item.id)
+    setSelectedTopicContext(
+      item.meetingId
+        ? {
+            id: item.meetingId,
+            title: item.meetingTitle || item.title,
+            meetingId: item.meetingId,
+          }
+        : null,
+    )
+    setConversationTurns([
+      {
+        id: item.id,
+        query: item.query || item.title,
+        answer: item.preview
+          ? {
+              mode: 'history',
+              text: item.preview,
+            }
+          : null,
+        sourceCount: 0,
+        meetingTitle: item.meetingTitle || '',
+      },
+    ])
+    setQuery('')
+    setSearchMessage('')
+  }
 
-      if (normalizedMeetings.length > 0) {
-        setMeetings(normalizedMeetings)
-        setSelectedMeetingId(normalizedMeetings[0].id)
-      }
-    } catch (error) {
-      console.error(error)
-      setMeetings(initialMeetings)
-      setSelectedMeetingId(initialMeetings[0].id)
-    }
+  const handleStartGraphSync = () => {
+    startGraphWorkspaceSync()
   }
 
   if (session === undefined) {
@@ -802,13 +848,42 @@ function App() {
                   aria-label="Search indexed meetings"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Ask for summaries, decisions, blockers, or any moment from the recording"
+                  placeholder={
+                    selectedTopicContext
+                      ? `Ask inside ${selectedTopicContext.title}`
+                      : 'Ask for summaries, decisions, blockers, or any moment from the recording'
+                  }
                   rows={2}
                 />
                 <button className="send-button" type="submit" disabled={isSearching}>
                   {isSearching ? 'Searching' : 'Search'}
                 </button>
               </form>
+            ) : null}
+
+            {!hasConversation && !selectedTopicContext ? (
+              <section className="topic-grid" aria-label="Indexed topic shortcuts">
+                {embeddedTopicCards.map((topic) => (
+                  <button
+                    className="topic-chip"
+                    key={topic.id}
+                    type="button"
+                    onClick={() => handleTopicSelect(topic)}
+                  >
+                    {topic.title}
+                  </button>
+                ))}
+              </section>
+            ) : null}
+
+            {!hasConversation && selectedTopicContext ? (
+              <div className="selected-topic-pill" aria-live="polite">
+                <span>Context</span>
+                <strong>{selectedTopicContext.title}</strong>
+                <button type="button" onClick={() => setSelectedTopicContext(null)}>
+                  Clear
+                </button>
+              </div>
             ) : null}
 
             <div className={`status-stack ${hasConversation ? 'compact' : ''}`}>

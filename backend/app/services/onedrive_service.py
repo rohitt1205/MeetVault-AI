@@ -13,7 +13,6 @@ RECORDING_KEYWORDS = {"recording", "transcript", "meeting", "teams"}
 
 class OneDriveService:
     _recording_search_queries = [
-        "*",
         "mp4",
         ".mp4",
         "webm",
