@@ -33,6 +33,17 @@ class AnswerServiceTests(unittest.TestCase):
         self.assertEqual(answer["mode"], "retrieval_brief")
         self.assertIn("The agent scans market feeds in real time.", answer["text"])
 
+    def test_compose_ignores_repeated_low_signal_transcripts(self):
+        results = [
+            {
+                "text": "Unknown: You You You You You You You You You You You You You You You You You",
+            }
+        ]
+
+        answer = AnswerService.compose("summarize LWC Training", results)
+
+        self.assertIsNone(answer)
+
 
 if __name__ == "__main__":
     unittest.main()

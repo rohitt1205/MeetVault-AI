@@ -547,55 +547,72 @@ function App() {
           .select('id,title,preview,query,meeting_id,meeting_title,created_at')
           .single()
 
-        if (error) {
-          console.error('History insert failed:', error)
-          setHistoryError('Search history could not be saved to Supabase.')
-          return
-        }
+      if (historyInsertError) {
+        console.error('History insert failed:', historyInsertError)
+        setHistoryError('This chat is only saved locally until history storage is ready.')
+      } else {
+        const persistedHistory = mapHistoryRow(savedHistory)
 
-        const newHistoryItem = mapHistoryRow(data)
-        setHistory((items) => [newHistoryItem, ...items.filter((item) => item.id !== newHistoryItem.id)])
-        setActiveHistoryId(newHistoryItem.id)
-        setActiveConversationRecordId(newHistoryItem.id)
-      } catch (error) {
-        console.error(error)
-        setSearchMessage('')
-        setPipelineNotice(error.message || 'RAG query failed.')
-      } finally {
-        setIsSearching(false)
+        setHistory((items) =>
+          items.map((item) => (item.id === historyItem.id ? persistedHistory : item)),
+        )
+
+        setActiveHistoryId(persistedHistory.id)
       }
-    },
-    [activeConversationRecordId, userId],
-  )
 
-  const handleSearch = async (event) => {
-    event.preventDefault()
-    await executeSearch(query)
+      const response = await fetch(
+        `${API_BASE_URL}/search?query=${encodeURIComponent(trimmedQuery)}`,
+        {
+          headers: authToken
+            ? {
+                Authorization: `Bearer ${authToken}`,
+                'X-Meeting-Context': selectedMeeting?.id || '',
+              }
+            : undefined,
+        },
+      )
+
+      if (!response.ok) {
+        throw new Error('Search request failed')
+      }
+    } catch (error) {
+      console.error(error)
+    } finally {
+      setIsSearching(false)
+      setQuery('')
+    }
   }
 
-  const handleStartGraphSync = async () => {
-    await startGraphWorkspaceSync()
-  }
+  const refreshLatestMeetings = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/meetings/recent`, {
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+      })
 
-  const handleHistorySelect = async (item) => {
-    setActiveHistoryId(item.id)
-    setActiveConversationRecordId(item.id)
-    setConversationTurns([])
-    await executeSearch(item.query, {
-      persistHistory: false,
-      historyId: item.id,
-      meetingId: item.meetingId || null,
-    })
-  }
+      if (!response.ok) {
+        throw new Error('Meeting request failed')
+      }
 
-  const handleReset = () => {
-    setQuery('')
-    setConversationTurns([])
-    setSearchMessage('')
-    setPipelineNotice('')
-    setHistoryError('')
-    setActiveHistoryId('')
-    setActiveConversationRecordId('')
+      const data = await response.json()
+      const normalizedMeetings = data.map((meeting) => ({
+        id: meeting.meeting_id,
+        title: meeting.title,
+        team: meeting.organizer || 'Microsoft Teams',
+        time: meeting.start_time || 'Latest',
+        summary:
+          'Retrieved from Microsoft Graph. RAG topics will attach after transcript ingestion.',
+        tags: ['Graph', 'Latest'],
+      }))
+
+      if (normalizedMeetings.length > 0) {
+        setMeetings(normalizedMeetings)
+        setSelectedMeetingId(normalizedMeetings[0].id)
+      }
+    } catch (error) {
+      console.error(error)
+      setMeetings(initialMeetings)
+      setSelectedMeetingId(initialMeetings[0].id)
+    }
   }
 
   if (session === undefined) {

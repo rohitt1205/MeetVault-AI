@@ -22,12 +22,65 @@ class ChromaServiceTests(unittest.TestCase):
         }
 
         with patch.object(ChromaService, "collection", MagicMock()) as mock_collection:
+            mock_collection.count.return_value = 3
             mock_collection.query.return_value = fake_response
 
             result = ChromaService.query_embeddings([0.1, 0.2], n_results=5)
 
         self.assertEqual(result["documents"][0], ["live text 1", "live text 2"])
         self.assertEqual(result["ids"][0], ["upload-1:1", "upload-2:1"])
+
+    def test_query_embeddings_uses_wide_candidate_pool_for_reranking(self):
+        fake_response = {
+            "documents": [["live text"]],
+            "metadatas": [[{"meeting_id": "upload-1", "meeting_title": "One"}]],
+            "distances": [[1.0]],
+            "ids": [["upload-1:1"]],
+        }
+
+        with patch.object(ChromaService, "collection", MagicMock()) as mock_collection:
+            mock_collection.count.return_value = 100
+            mock_collection.query.return_value = fake_response
+
+            ChromaService.query_embeddings([0.1, 0.2], n_results=5, candidate_pool_size=80)
+
+        mock_collection.query.assert_called_once()
+        self.assertEqual(mock_collection.query.call_args.kwargs["n_results"], 80)
+
+    def test_query_embeddings_filters_disallowed_source_types_before_limiting(self):
+        fake_response = {
+            "documents": [[
+                "old local chunk",
+                "sharepoint chunk",
+            ]],
+            "metadatas": [[
+                {
+                    "meeting_id": "upload-1",
+                    "meeting_title": "Asynchronous apex",
+                    "source_type": "uploaded_transcript",
+                },
+                {
+                    "meeting_id": "sharepoint-1",
+                    "meeting_title": "LWC Training",
+                    "source_type": "sharepoint_recording_transcription",
+                },
+            ]],
+            "distances": [[0.01, 1.20]],
+            "ids": [["upload-1:1", "sharepoint-1:1"]],
+        }
+
+        with patch.object(ChromaService, "collection", MagicMock()) as mock_collection:
+            mock_collection.count.return_value = 2
+            mock_collection.query.return_value = fake_response
+
+            result = ChromaService.query_embeddings(
+                [0.1, 0.2],
+                n_results=1,
+                allowed_source_types={"sharepoint_recording_transcription"},
+            )
+
+        self.assertEqual(result["documents"][0], ["sharepoint chunk"])
+        self.assertEqual(result["ids"][0], ["sharepoint-1:1"])
 
     def test_remove_legacy_documents_deletes_only_legacy_ids(self):
         fake_collection = MagicMock()

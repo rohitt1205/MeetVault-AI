@@ -13,6 +13,7 @@ RECORDING_KEYWORDS = {"recording", "transcript", "meeting", "teams"}
 
 class OneDriveService:
     _recording_search_queries = [
+        "*",
         "mp4",
         ".mp4",
         "webm",
@@ -22,6 +23,10 @@ class OneDriveService:
         "mp3",
         ".mp3",
         "recording",
+        "recorded",
+        "video",
+        "training",
+        "Recordings",
         "teams recording",
         "meeting recording",
         "transcript",
@@ -341,9 +346,21 @@ class OneDriveService:
         name = (file_item.get("name") or "").lower()
         web_url = (file_item.get("webUrl") or "").lower()
         extension = OneDriveService._extension_for_item(file_item)
+        content_type = (
+            ((file_item.get("listItem") or {}).get("contentType") or {}).get("name")
+            or file_item.get("contentType")
+            or ""
+        ).lower()
 
         mime_type = ((file_item.get("file") or {}).get("mimeType") or "").lower()
-        if mime_type.startswith("video/") or mime_type.startswith("audio/"):
+        if (
+            mime_type.startswith("video/")
+            or mime_type.startswith("audio/")
+            or "recording" in mime_type
+            or "stream" in mime_type
+        ):
+            return True
+        if "video" in file_item or "recording" in content_type or "video" in content_type:
             return True
         if mime_type:
             return False
@@ -356,6 +373,9 @@ class OneDriveService:
 
         if extension == ".txt":
             return any(keyword in name for keyword in RECORDING_KEYWORDS)
+
+        if "stream.aspx" in web_url or "/recordings/" in web_url:
+            return True
 
         return False
 
