@@ -15,11 +15,7 @@ from app.rag.retrieve import retrieve_and_answer
 def run_e2e_test():
     print("=== Starting RAG End-to-End Test ===")
     
-    # Optional: Check if API key is set
-    if not os.getenv("GEMINI_API_KEY"):
-        print("WARNING: GEMINI_API_KEY environment variable is not set.")
-        print("Please set it before running this test, e.g., using: export GEMINI_API_KEY='your_key'")
-        return
+    print(f"Using local Ollama SLM: {os.getenv('RAG_MODEL', 'qwen2.5:7b')}")
         
     print("\n1. Ingesting dummy transcript...")
     ingest_result = ingest_transcript(DUMMY_MEETING_TRANSCRIPT)

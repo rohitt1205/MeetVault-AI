@@ -1,63 +1,81 @@
 import os
+import logging
+from typing import Optional
 
 import requests
 from dotenv import load_dotenv
+from tenacity import retry, stop_after_attempt, wait_exponential
+
+from app.rag.guardrails_config import SafetyMiddleware
 
 load_dotenv()
-
-
-def _generate_with_gemini(prompt: str, model_name: str) -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY is not set in the environment variables.")
-
-    try:
-        # pyrefly: ignore [missing-import]
-        import google.generativeai as genai
-    except ImportError as exc:  # pragma: no cover - depends on local dependency install
-        raise RuntimeError(
-            "google-generativeai is not installed. Install it in the backend environment to use Gemini for /rag/query."
-        ) from exc
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name)
-    response = model.generate_content(prompt)
-    return response.text
+logger = logging.getLogger(__name__)
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")).rstrip("/")
 
 
 def _generate_with_ollama(prompt: str, model_name: str) -> str:
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
     if not model_name:
-        raise ValueError(
-            "RAG_MODEL must be set when RAG_PROVIDER=ollama. Example: qwen2.5:3b-instruct"
-        )
+        raise ValueError("RAG_MODEL must be set. Example: qwen2.5:7b")
 
     response = requests.post(
-        f"{ollama_host}/api/generate",
+        f"{OLLAMA_BASE_URL}/api/generate",
         json={
             "model": model_name,
             "prompt": prompt,
             "stream": False,
+            "options": {"temperature": 0.0, "top_p": 0.1},
         },
-        timeout=120,
+        timeout=60,
     )
     response.raise_for_status()
     payload = response.json()
     return (payload.get("response") or "").strip()
 
 
-def generate_answer(prompt: str) -> str:
-    """
-    Calls the configured answer model provider to generate a grounded response.
-    """
-    provider = (os.getenv("RAG_PROVIDER") or "gemini").strip().lower()
-    model_name = (os.getenv("RAG_MODEL") or "gemini-2.5-flash").strip()
+def _get_available_qwen_model() -> str:
+    configured_model = (os.getenv("RAG_MODEL") or "").strip()
+    default_model = "qwen2.5:7b"
+    preferred_model = configured_model or default_model
+    try:
+        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
+        response.raise_for_status()
+        installed_names = [
+            model.get("name")
+            for model in response.json().get("models", [])
+            if model.get("name")
+        ]
+        if preferred_model in installed_names:
+            return preferred_model
+        if configured_model:
+            logger.warning(
+                "Configured RAG_MODEL '%s' is not installed in Ollama. Installed models: %s",
+                configured_model,
+                installed_names,
+            )
+        for name in installed_names:
+            if "qwen" in name.lower():
+                return name
+    except Exception as exc:
+        logger.info("Could not inspect Ollama models: %s", exc)
 
-    if provider == "gemini":
-        return _generate_with_gemini(prompt, model_name)
-    if provider == "ollama":
-        return _generate_with_ollama(prompt, model_name)
+    return preferred_model
 
-    raise ValueError(
-        f"Unsupported RAG_PROVIDER '{provider}'. Use 'gemini' or 'ollama'."
+
+@retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
+def _generate_with_qwen(prompt: str) -> str:
+    return _generate_with_ollama(prompt, _get_available_qwen_model())
+
+
+def generate_answer(prompt: str, query: Optional[str] = None, context: Optional[str] = None) -> str:
+    """
+    Calls the local Ollama/Qwen SLM to generate a grounded response.
+    """
+    fallback_response = "Information not found in the provided context."
+    if query and not SafetyMiddleware.validate_input(query):
+        return fallback_response
+
+    answer = _generate_with_qwen(prompt)
+
+    return SafetyMiddleware.sanitize_output(
+        SafetyMiddleware.validate_output(answer, context=context, query=query)
     )

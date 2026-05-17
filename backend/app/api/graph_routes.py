@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Header, HTTPException, Query
 
 from app.services.answer_service import AnswerService
-from app.services.chroma_service import ChromaService
+from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
 from app.services.ingestion_service import IngestionService
 from app.services.ingestion_state_service import IngestionStateService
@@ -99,6 +99,7 @@ def semantic_search(
     results = ChromaService.query_embeddings(
         query_embedding,
         meeting_id=scoped_meeting_id,
+        allowed_source_types=MICROSOFT_SOURCE_TYPES,
     )
 
     documents = results.get("documents", [[]])[0]

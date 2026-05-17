@@ -6,6 +6,15 @@ import chromadb
 CHROMA_DB_PATH = os.getenv("CHROMA_DB_PATH", "./chroma_db")
 CHROMA_COLLECTION_NAME = os.getenv("CHROMA_COLLECTION_NAME", "meetvault_transcripts")
 
+MICROSOFT_SOURCE_TYPES = {
+    "graph_transcript",
+    "graph_recording_transcription",
+    "onedrive_transcript",
+    "onedrive_video_transcription",
+    "sharepoint_transcript",
+    "sharepoint_recording_transcription",
+}
+
 
 class ChromaService:
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
@@ -60,16 +69,29 @@ class ChromaService:
         *,
         meeting_id: str | None = None,
         n_results: int = 5,
+        candidate_pool_size: int | None = None,
+        allowed_source_types: set[str] | None = None,
     ) -> dict:
         where = {"meeting_id": meeting_id} if meeting_id else None
-        raw_limit = n_results if meeting_id else max(n_results * 3, n_results + 10)
+        collection_count = ChromaService.collection.count()
+        if collection_count == 0:
+            return {
+                "documents": [[]],
+                "metadatas": [[]],
+                "distances": [[]],
+                "ids": [[]],
+            }
+
+        requested_pool_size = candidate_pool_size or max(n_results * 10, 50)
+        raw_limit = min(
+            collection_count,
+            n_results if meeting_id else max(requested_pool_size, n_results),
+        )
         response = ChromaService.collection.query(
             query_embeddings=[query_embedding],
             n_results=raw_limit,
             where=where,
         )
-        if meeting_id:
-            return response
 
         documents = response.get("documents", [[]])[0]
         metadatas = response.get("metadatas", [[]])[0]
@@ -84,6 +106,11 @@ class ChromaService:
         for index, document in enumerate(documents):
             metadata = metadatas[index] if index < len(metadatas) else {}
             if not ChromaService._is_live_metadata(metadata):
+                continue
+            if (
+                allowed_source_types is not None
+                and metadata.get("source_type") not in allowed_source_types
+            ):
                 continue
 
             filtered_documents.append(document)

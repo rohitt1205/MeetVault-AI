@@ -10,6 +10,17 @@ SUMMARY_HINTS = (
     "key takeaway",
     "high level",
 )
+LOW_SIGNAL_WORDS = {
+    "ah",
+    "hmm",
+    "okay",
+    "ok",
+    "um",
+    "uh",
+    "yeah",
+    "yes",
+    "you",
+}
 
 LINE_PREFIX_PATTERN = re.compile(
     r"^\s*(?:\d{2}:\d{2}:\d{2}(?:\.\d{3})?\s+)?[^:]{1,40}:\s*"
@@ -36,6 +47,20 @@ class AnswerService:
         return sentences
 
     @staticmethod
+    def _is_meaningful_passage(text: str) -> bool:
+        tokens = re.findall(r"[a-zA-Z0-9]+", (text or "").lower())
+        meaningful_tokens = [
+            token
+            for token in tokens
+            if len(token) > 2 and token not in LOW_SIGNAL_WORDS
+        ]
+        if len(meaningful_tokens) < 5:
+            return False
+
+        unique_ratio = len(set(meaningful_tokens)) / len(meaningful_tokens)
+        return unique_ratio >= 0.25
+
+    @staticmethod
     def compose(query: str, results: list[dict]) -> dict | None:
         if not results:
             return None
@@ -44,7 +69,11 @@ class AnswerService:
             AnswerService._normalize_passage(result.get("text") or "")
             for result in results[:4]
         ]
-        normalized_passages = [passage for passage in normalized_passages if passage]
+        normalized_passages = [
+            passage
+            for passage in normalized_passages
+            if passage and AnswerService._is_meaningful_passage(passage)
+        ]
         if not normalized_passages:
             return None
 

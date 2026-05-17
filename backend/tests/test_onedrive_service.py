@@ -121,6 +121,22 @@ class OneDriveServiceTests(unittest.TestCase):
             })
         )
 
+    def test_is_recording_asset_accepts_stream_meeting_card_without_extension(self):
+        self.assertTrue(
+            OneDriveService._is_recording_asset({
+                "name": "LWC Training",
+                "webUrl": "https://contoso.sharepoint.com/_layouts/15/stream.aspx?id=abc",
+            })
+        )
+
+    def test_is_recording_asset_accepts_video_facet_without_extension(self):
+        self.assertTrue(
+            OneDriveService._is_recording_asset({
+                "name": "MuleSoft ELT 7",
+                "video": {},
+            })
+        )
+
     @patch("app.services.onedrive_service.OneDriveService.search_files")
     @patch("app.services.onedrive_service.OneDriveService._search_shared_with_me")
     @patch("app.services.onedrive_service.OneDriveService._list_recent_files")
