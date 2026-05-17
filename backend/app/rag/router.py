@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Header
+from app.api.mcp_routes import get_user_key_from_header
 from pydantic import BaseModel
 from app.rag.ingest import ingest_transcript
 from app.rag.retrieve import retrieve_and_answer
@@ -11,10 +12,7 @@ class IngestRequest(BaseModel):
     
 class QueryRequest(BaseModel):
     query: str
-<<<<<<< HEAD
     meeting_id: str | None = None
-=======
->>>>>>> origin/main
 
 @router.post("/ingest")
 def ingest_text(request: IngestRequest):
@@ -39,16 +37,13 @@ def ingest_dummy_data():
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/query")
-def query_rag(request: QueryRequest):
+def query_rag(request: QueryRequest, authorization: str = Header(None)):
     """
     Queries the RAG pipeline with a user question and returns the grounded answer.
     """
     try:
-<<<<<<< HEAD
-        result = retrieve_and_answer(request.query, meeting_id=request.meeting_id)
-=======
-        result = retrieve_and_answer(request.query)
->>>>>>> origin/main
+        user_key = get_user_key_from_header(authorization)
+        result = retrieve_and_answer(request.query, meeting_id=request.meeting_id, user_key=user_key)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
