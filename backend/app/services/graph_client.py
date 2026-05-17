@@ -116,6 +116,39 @@ class GraphClient:
         return response.content
 
     @staticmethod
+    def download_to_file(
+        endpoint: str,
+        access_token: str,
+        file_path: str,
+        params: dict | None = None,
+    ) -> None:
+        url = GraphClient._url(endpoint)
+        headers = GraphClient._headers(access_token)
+        try:
+            with requests.get(
+                url,
+                headers=headers,
+                params=params,
+                stream=True,
+                timeout=GRAPH_TIMEOUT_SECONDS,
+            ) as r:
+                if r.status_code >= 400:
+                    raise HTTPException(
+                        status_code=r.status_code,
+                        detail={
+                            "message": "Microsoft Graph returned an error during download",
+                            "endpoint": endpoint,
+                            "response": r.text,
+                        },
+                    )
+                r.raise_for_status()
+                with open(file_path, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        f.write(chunk)
+        except requests.exceptions.RequestException as exc:
+            raise HTTPException(status_code=502, detail=f"Graph download failed: {exc}") from exc
+
+    @staticmethod
     def post(endpoint: str, access_token: str, payload: dict) -> dict:
         response = GraphClient._request(
             "POST",

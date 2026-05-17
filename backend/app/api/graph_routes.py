@@ -5,6 +5,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.ingestion_service import IngestionService
 from app.services.ingestion_state_service import IngestionStateService
 from app.services.meeting_service import MeetingService
+from app.services.onedrive_service import OneDriveService
 
 router = APIRouter()
 
@@ -23,10 +24,18 @@ def get_access_token(authorization: str | None) -> str:
 @router.get("/meetings/recent")
 def fetch_recent_meetings(
     authorization: str = Header(None),
-    limit: int = Query(10, ge=1, le=50),
+    limit: int = Query(50, ge=1, le=100),
 ):
     access_token = get_access_token(authorization)
-    return MeetingService.get_recent_meetings(access_token, limit=limit)
+    meetings = MeetingService.get_recent_meetings(access_token, limit=limit)
+    
+    # We cannot aggressively search OneDrive for 50 meetings at once because Microsoft Graph 
+    # strictly rate-limits search queries (429 Too Many Requests), causing valid meetings to disappear.
+    # Instead, we just return the valid Teams meetings.
+    for meeting in meetings:
+        meeting["status"] = IngestionStateService.get_status(meeting["event_id"])
+        
+    return meetings
 
 
 @router.post("/ingestion/meetings/{event_id}")

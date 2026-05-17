@@ -5,6 +5,8 @@ class MeetingService:
     @staticmethod
     def _normalize_event(event: dict) -> dict:
         online_meeting = event.get("onlineMeeting") or {}
+        organizer = event.get("organizer") or {}
+        email_address = organizer.get("emailAddress") or {}
 
         return {
             "meeting_id": event.get("id"),
@@ -12,16 +14,8 @@ class MeetingService:
             "online_meeting_id": online_meeting.get("id"),
             "join_url": online_meeting.get("joinUrl") or event.get("onlineMeetingUrl"),
             "title": event.get("subject") or "Untitled meeting",
-            "organizer": (
-                event.get("organizer", {})
-                .get("emailAddress", {})
-                .get("name")
-            ),
-            "organizer_email": (
-                event.get("organizer", {})
-                .get("emailAddress", {})
-                .get("address")
-            ),
+            "organizer": email_address.get("name") or "Unknown Organizer",
+            "organizer_email": email_address.get("address"),
             "start_time": event.get("start", {}).get("dateTime"),
             "end_time": event.get("end", {}).get("dateTime"),
             "is_online_meeting": event.get("isOnlineMeeting"),
