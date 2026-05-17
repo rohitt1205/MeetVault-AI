@@ -189,7 +189,7 @@ function App() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'azure',
       options: {
-        scopes: 'openid profile email User.Read',
+        scopes: 'openid profile email User.Read Calendars.Read OnlineMeetings.Read',
       },
     })
 
@@ -261,9 +261,9 @@ function App() {
         {
           headers: authToken
             ? {
-                Authorization: `Bearer ${authToken}`,
-                'X-Meeting-Context': selectedMeeting?.id || '',
-              }
+              Authorization: `Bearer ${authToken}`,
+              'X-Meeting-Context': selectedMeeting?.id || '',
+            }
             : undefined,
         },
       )
@@ -278,6 +278,12 @@ function App() {
       setQuery('')
     }
   }
+
+  useEffect(() => {
+    if (authToken) {
+      refreshLatestMeetings()
+    }
+  }, [authToken])
 
   const refreshLatestMeetings = async () => {
     try {
@@ -298,16 +304,56 @@ function App() {
         summary:
           'Retrieved from Microsoft Graph. RAG topics will attach after transcript ingestion.',
         tags: ['Graph', 'Latest'],
+        status: meeting.status || 'UNPROCESSED',
       }))
 
       if (normalizedMeetings.length > 0) {
         setMeetings(normalizedMeetings)
         setSelectedMeetingId(normalizedMeetings[0].id)
+      } else {
+        alert("No recent recorded meetings found in your Microsoft calendar.")
+        setMeetings([])
+        setSelectedMeetingId(null)
       }
     } catch (error) {
+      console.error("Refresh Error:", error)
+      alert(`Error fetching meetings: ${error.message}`)
+      setMeetings([])
+      setSelectedMeetingId(null)
+    }
+  }
+
+  const handleIngest = async (event, meetingId) => {
+    event.stopPropagation()
+    const originalMeetings = [...meetings]
+    
+    setMeetings((prev) => 
+      prev.map((m) => m.id === meetingId ? { ...m, status: 'PROCESSING' } : m)
+    )
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/ingestion/meetings/${meetingId}`, {
+        method: 'POST',
+        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        const errorDetail = typeof errorData.detail === 'string' 
+          ? errorData.detail 
+          : JSON.stringify(errorData.detail || 'Unknown error')
+        throw new Error(`${response.status} - ${errorDetail}`)
+      }
+
+      setMeetings((prev) => 
+        prev.map((m) => m.id === meetingId ? { ...m, status: 'EMBEDDED' } : m)
+      )
+    } catch (error) {
       console.error(error)
-      setMeetings(initialMeetings)
-      setSelectedMeetingId(initialMeetings[0].id)
+      alert(`Ingestion Failed: ${error.message}`)
+      setMeetings((prev) => 
+        prev.map((m) => m.id === meetingId ? { ...m, status: 'FAILED' } : m)
+      )
     }
   }
 
@@ -391,19 +437,19 @@ function App() {
 
           {!isHistoryLoading
             ? history.map((item) => (
-                <button
-                  className={`history-item ${item.id === activeHistoryId ? 'active' : ''}`}
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    setActiveHistoryId(item.id)
-                    setQuery(item.query || '')
-                  }}
-                >
-                  <span>{item.title}</span>
-                  <small>{item.preview}</small>
-                </button>
-              ))
+              <button
+                className={`history-item ${item.id === activeHistoryId ? 'active' : ''}`}
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  setActiveHistoryId(item.id)
+                  setQuery(item.query || '')
+                }}
+              >
+                <span>{item.title}</span>
+                <small>{item.preview}</small>
+              </button>
+            ))
             : null}
 
           {historyError ? <p className="history-note error">{historyError}</p> : null}
@@ -521,9 +567,8 @@ function App() {
             <div className="meeting-list">
               {meetings.map((meeting) => (
                 <button
-                  className={`meeting-card ${
-                    meeting.id === selectedMeetingId ? 'selected' : ''
-                  }`}
+                  className={`meeting-card ${meeting.id === selectedMeetingId ? 'selected' : ''
+                    }`}
                   key={meeting.id}
                   type="button"
                   onClick={() => setSelectedMeetingId(meeting.id)}
@@ -540,7 +585,34 @@ function App() {
                     {meeting.tags.map((tag) => (
                       <span key={tag}>{tag}</span>
                     ))}
+                    {meeting.status === 'EMBEDDED' && (
+                      <span style={{ backgroundColor: 'var(--success-color, #10b981)', color: 'white' }}>
+                        Stored in Vector DB
+                      </span>
+                    )}
+                    {meeting.status === 'PROCESSING' && (
+                      <span style={{ backgroundColor: 'var(--warning-color, #f59e0b)', color: 'white' }}>
+                        Processing...
+                      </span>
+                    )}
+                    {meeting.status === 'FAILED' && (
+                      <span style={{ backgroundColor: 'var(--error-color, #ef4444)', color: 'white' }}>
+                        Failed
+                      </span>
+                    )}
                   </div>
+                  {meeting.status !== 'EMBEDDED' && meeting.status !== 'PROCESSING' && (
+                    <div style={{ marginTop: '0.5rem' }}>
+                      <button 
+                        type="button" 
+                        className="send-button"
+                        style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
+                        onClick={(e) => handleIngest(e, meeting.id)}
+                      >
+                        {meeting.status === 'FAILED' ? 'Retry Transcript & Embed' : 'Generate Transcript & Embed'}
+                      </button>
+                    </div>
+                  )}
                 </button>
               ))}
             </div>
