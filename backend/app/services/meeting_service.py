@@ -1,10 +1,28 @@
+from datetime import datetime, timedelta, timezone
+
 from app.services.graph_client import GraphClient
 
 
 class MeetingService:
     @staticmethod
+    def _parse_datetime(value: str | None) -> datetime | None:
+        if not value:
+            return None
+
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+
+        return parsed
+
+    @staticmethod
     def _normalize_event(event: dict) -> dict:
         online_meeting = event.get("onlineMeeting") or {}
+        organizer_email = (event.get("organizer") or {}).get("emailAddress") or {}
 
         return {
             "meeting_id": event.get("id"),
@@ -12,16 +30,8 @@ class MeetingService:
             "online_meeting_id": online_meeting.get("id"),
             "join_url": online_meeting.get("joinUrl") or event.get("onlineMeetingUrl"),
             "title": event.get("subject") or "Untitled meeting",
-            "organizer": (
-                event.get("organizer", {})
-                .get("emailAddress", {})
-                .get("name")
-            ),
-            "organizer_email": (
-                event.get("organizer", {})
-                .get("emailAddress", {})
-                .get("address")
-            ),
+            "organizer": organizer_email.get("name") or "Unknown Organizer",
+            "organizer_email": organizer_email.get("address"),
             "start_time": event.get("start", {}).get("dateTime"),
             "end_time": event.get("end", {}).get("dateTime"),
             "is_online_meeting": event.get("isOnlineMeeting"),
@@ -30,9 +40,11 @@ class MeetingService:
 
     @staticmethod
     def get_recent_meetings(access_token: str, limit: int = 10) -> list[dict]:
+        now = datetime.now(timezone.utc)
         params = {
-            "$top": limit,
-            "$orderby": "start/dateTime desc",
+            "startDateTime": (now - timedelta(days=30)).isoformat(),
+            "endDateTime": (now + timedelta(days=1)).isoformat(),
+            "$top": max(limit * 4, 25),
             "$select": (
                 "id,subject,organizer,start,end,isOnlineMeeting,"
                 "onlineMeeting,onlineMeetingUrl,bodyPreview"
@@ -40,7 +52,7 @@ class MeetingService:
         }
 
         events = GraphClient.get_collection(
-            endpoint="/me/events",
+            endpoint="/me/calendarView",
             access_token=access_token,
             params=params,
         )
@@ -48,10 +60,21 @@ class MeetingService:
         meetings = []
 
         for event in events:
-            if event.get("isOnlineMeeting"):
-                meetings.append(MeetingService._normalize_event(event))
+            normalized = MeetingService._normalize_event(event)
+            end_time = MeetingService._parse_datetime(normalized.get("end_time"))
+            if event.get("isOnlineMeeting") and end_time and end_time <= now:
+                meetings.append(normalized)
 
-        return meetings
+        meetings.sort(
+            key=lambda meeting: (
+                MeetingService._parse_datetime(meeting.get("end_time"))
+                or MeetingService._parse_datetime(meeting.get("start_time"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ),
+            reverse=True,
+        )
+
+        return meetings[:limit]
 
     @staticmethod
     def get_meeting_event(access_token: str, event_id: str) -> dict:

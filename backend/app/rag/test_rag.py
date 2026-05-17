@@ -1,0 +1,47 @@
+import os
+import sys
+from pprint import pprint
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Make sure we can import from app
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+from app.rag.dummy_data import DUMMY_MEETING_TRANSCRIPT
+from app.rag.ingest import ingest_transcript
+from app.rag.retrieve import retrieve_and_answer
+
+def run_e2e_test():
+    print("=== Starting RAG End-to-End Test ===")
+    
+    # Optional: Check if API key is set
+    if not os.getenv("GEMINI_API_KEY"):
+        print("WARNING: GEMINI_API_KEY environment variable is not set.")
+        print("Please set it before running this test, e.g., using: export GEMINI_API_KEY='your_key'")
+        return
+        
+    print("\n1. Ingesting dummy transcript...")
+    ingest_result = ingest_transcript(DUMMY_MEETING_TRANSCRIPT)
+    print(f"Ingestion result: {ingest_result}")
+    
+    print("\n2. Testing Queries...")
+    
+    queries = [
+        "What are the action items for Bob and Charlie?",
+        "When is the database upgrade scheduled for and will there be downtime?",
+        "Why was the phone number verification removed from onboarding?",
+        "What is the company's annual revenue?" # This should yield a "I don't know" answer based on prompt
+    ]
+    
+    for query in queries:
+        print(f"\n---")
+        print(f"QUERY: {query}")
+        result = retrieve_and_answer(query)
+        print(f"ANSWER: {result.get('answer')}")
+        print(f"SOURCES USED: {len(result.get('sources', []))}")
+        
+    print("\n=== RAG End-to-End Test Complete ===")
+
+if __name__ == "__main__":
+    run_e2e_test()
