@@ -220,6 +220,8 @@ __marimo__/
 
 /backend/uploaded_assets/
 /backend/chroma_db/
+/backend/chroma_db*/
+/chroma_db/
 
 # JavaScript / frontend
 node_modules/

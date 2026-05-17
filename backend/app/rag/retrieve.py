@@ -1,11 +1,11 @@
-<<<<<<< HEAD
 import re
 
+from app.mcp.mcp_manager import MCPManager
+from app.rag.llm import generate_answer
+from app.rag.prompts import RAG_SYSTEM_PROMPT
+from app.services.answer_service import AnswerService
 from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
-from app.services.answer_service import AnswerService
-from app.rag.prompts import RAG_SYSTEM_PROMPT
-from app.rag.llm import generate_answer
 
 
 STOPWORDS = {
@@ -36,6 +36,17 @@ STOPWORDS = {
     "what",
 }
 LOW_SIGNAL_WORDS = {"ah", "hmm", "okay", "ok", "um", "uh", "yeah", "yes", "you"}
+JIRA_KEYWORDS = {
+    "jira",
+    "ticket",
+    "tickets",
+    "assigned",
+    "task",
+    "tasks",
+    "issue",
+    "issues",
+    "sprint",
+}
 
 
 def _tokens(value: str) -> set[str]:
@@ -91,10 +102,18 @@ def _score_source(query: str, source: dict) -> float:
 
     title_overlap = len(query_tokens & title_tokens)
     text_overlap = len(query_tokens & text_tokens)
-    compact_query = " ".join(token for token in re.findall(r"[a-zA-Z0-9]+", query.lower()) if token not in STOPWORDS)
+    compact_query = " ".join(
+        token
+        for token in re.findall(r"[a-zA-Z0-9]+", query.lower())
+        if token not in STOPWORDS
+    )
     compact_title = " ".join(re.findall(r"[a-zA-Z0-9]+", title.lower()))
     phrase_bonus = 3.0 if compact_query and compact_query in compact_title else 0.0
-    source_bonus = 0.2 if source_type in {"sharepoint_recording_transcription", "graph_recording_transcription"} else 0.0
+    source_bonus = (
+        0.2
+        if source_type in {"sharepoint_recording_transcription", "graph_recording_transcription"}
+        else 0.0
+    )
 
     return (
         semantic_score
@@ -153,24 +172,41 @@ def _is_queryable_source(source: dict) -> bool:
     )
 
 
-def retrieve_and_answer(user_query: str, meeting_id: str | None = None) -> dict:
-=======
-from app.services.chroma_service import ChromaService
-from app.rag.ingest import embedding_model
-from app.rag.prompts import RAG_SYSTEM_PROMPT
-from app.rag.llm import generate_answer
+def _append_jira_context(user_query: str, user_key: str, sources: list[dict]) -> tuple[str, list[dict]]:
+    query_terms = _tokens(user_query)
+    if not query_terms & JIRA_KEYWORDS:
+        return "", sources
 
-def retrieve_and_answer(user_query: str) -> dict:
->>>>>>> origin/main
+    jira_tickets = MCPManager.get_jira_tickets(user_key)
+    if not jira_tickets:
+        return "", sources
+
+    jira_context = "\n".join(
+        f"[{ticket['ticket_id']}] {ticket['summary']} (Status: {ticket['status']})"
+        for ticket in jira_tickets
+    )
+    mcp_source = {
+        "chunk_id": "mcp-jira-live",
+        "distance": 0.0,
+        "text": f"Found {len(jira_tickets)} live Jira ticket(s) assigned to {user_key}.",
+        "metadata": {
+            "source_type": "mcp_jira",
+            "meeting_title": "Jira Workspace",
+            "meeting_id": "mcp-jira-live",
+        },
+    }
+    return f"\n\n---\n\nSource: Jira Workspace\n{jira_context}", [*sources, mcp_source]
+
+
+def retrieve_and_answer(
+    user_query: str,
+    meeting_id: str | None = None,
+    user_key: str = "demo",
+) -> dict:
     """
-    Retrieves relevant transcript chunks from ChromaDB based on the user query,
-    constructs a prompt, and calls the LLM to get a grounded answer.
+    Retrieves relevant transcript chunks from ChromaDB and generates a grounded answer.
     """
-    # 1. Embed the user query
-<<<<<<< HEAD
     query_embedding = EmbeddingService.generate_query_embedding(user_query)
-    
-    # 2. Query ChromaDB for relevant chunks
     results = ChromaService.query_embeddings(
         query_embedding,
         meeting_id=meeting_id,
@@ -178,31 +214,11 @@ def retrieve_and_answer(user_query: str) -> dict:
         candidate_pool_size=80,
         allowed_source_types=MICROSOFT_SOURCE_TYPES,
     )
-    
-    # 3. Extract the text chunks from the results
+
     retrieved_documents = results.get("documents", [[]])[0]
     retrieved_metadatas = results.get("metadatas", [[]])[0]
     retrieved_distances = results.get("distances", [[]])[0]
     retrieved_ids = results.get("ids", [[]])[0]
-=======
-    query_embedding = embedding_model.encode(user_query).tolist()
-    
-    # 2. Query ChromaDB for relevant chunks
-    results = ChromaService.query_embeddings(query_embedding)
-    
-    # 3. Extract the text chunks from the results
-    # results["documents"] is a list of lists, where the inner list corresponds to the single query
-    retrieved_documents = results.get("documents", [[]])[0]
->>>>>>> origin/main
-    
-    if not retrieved_documents:
-        return {
-            "query": user_query,
-<<<<<<< HEAD
-            "answer": "I don't have any meeting transcripts to answer that question.",
-            "answer_mode": "no_context",
-            "sources": [],
-        }
 
     candidate_sources = [
         _source_from_result(
@@ -219,45 +235,33 @@ def retrieve_and_answer(user_query: str) -> dict:
         [source for source in candidate_sources if _is_queryable_source(source)],
     )
 
+    jira_context, sources = _append_jira_context(user_query, user_key, sources)
+
     if not sources:
         return {
             "query": user_query,
             "answer": (
                 "I found embeddings in ChromaDB, but none from Microsoft Graph, "
-                "SharePoint, or OneDrive recordings matched this query yet."
+                "SharePoint, OneDrive recordings, or connected MCP tools matched this query yet."
             ),
             "answer_mode": "no_microsoft_context",
             "sources": [],
         }
-        
-    # Join retrieved chunks to form the context
+
     context_text = "\n\n---\n\n".join(
         f"Source: {(source.get('metadata') or {}).get('meeting_title') or 'Untitled meeting'}\n{source.get('text') or ''}"
         for source in sources
+        if (source.get("metadata") or {}).get("source_type") != "mcp_jira"
     )
-=======
-            "answer": "Information not found in the provided context.",
-            "sources": []
-        }
-        
-    # Join retrieved chunks to form the context
-    context_text = "\n\n---\n\n".join(retrieved_documents)
->>>>>>> origin/main
-    
-    # 4. Construct the Prompt
-    final_prompt = RAG_SYSTEM_PROMPT.format(
-        context=context_text,
-        query=user_query
-    )
-    
-<<<<<<< HEAD
-    # 5. Call LLM
+    context_text = f"{context_text}{jira_context}".strip()
+    final_prompt = RAG_SYSTEM_PROMPT.format(context=context_text, query=user_query)
+
     llm_error = None
     try:
         answer = generate_answer(final_prompt, query=user_query, context=context_text)
         answer_mode = "rag_answer"
-    except Exception as e:
-        llm_error = str(e)
+    except Exception as exc:
+        llm_error = str(exc)
         fallback_answer = AnswerService.compose(user_query, sources)
         if fallback_answer:
             answer = fallback_answer["text"]
@@ -268,22 +272,11 @@ def retrieve_and_answer(user_query: str) -> dict:
                 "available right now. Review the retrieved sources below."
             )
             answer_mode = "retrieval_only"
-=======
-    # 5. Call LLM with query and context for safety middleware validation
-    try:
-        answer = generate_answer(final_prompt, query=user_query, context=context_text)
-    except Exception as e:
-        answer = "Information not found in the provided context."
->>>>>>> origin/main
-        
+
     return {
         "query": user_query,
         "answer": answer,
-<<<<<<< HEAD
         "answer_mode": answer_mode,
         "llm_error": llm_error,
         "sources": sources,
-=======
-        "sources": retrieved_documents
->>>>>>> origin/main
     }
