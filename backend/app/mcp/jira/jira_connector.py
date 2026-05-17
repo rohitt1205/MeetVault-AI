@@ -1,6 +1,22 @@
 import requests
 
+from fastapi import HTTPException
 from requests.auth import HTTPBasicAuth
+
+
+def _clean_domain(domain: str) -> str:
+    clean_domain = (
+        (domain or "")
+        .strip()
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace(".atlassian.net", "")
+        .strip("/")
+    )
+    if not clean_domain:
+        raise HTTPException(status_code=400, detail="Jira domain is required.")
+    return clean_domain
+
 
 def verify_and_connect(
     email: str,
@@ -8,34 +24,38 @@ def verify_and_connect(
     api_token: str,
     user_key: str
 ):
-    clean_domain = (
-        domain
-        .replace("https://", "")
-        .replace("http://", "")
-        .replace(".atlassian.net", "")
-        .replace("/", "")
-    )
+    clean_domain = _clean_domain(domain)
 
     url = f"https://{clean_domain}.atlassian.net/rest/api/3/myself"
 
-    response = requests.get(
-        url,
-        auth=HTTPBasicAuth(email, api_token),
-        timeout=15
-    )
+    try:
+        response = requests.get(
+            url,
+            auth=HTTPBasicAuth(email.strip(), api_token),
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+    except requests.RequestException as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Jira connection request failed: {exc}",
+        ) from exc
 
     if not response.ok:
-        print(response.text)
-        return None
+        raise HTTPException(
+            status_code=response.status_code,
+            detail=f"Jira authentication failed: {response.text}",
+        )
 
     data = response.json()
 
     return {
         "connected": True,
         "display_name": data.get("displayName"),
-        "email": email,
+        "email": email.strip(),
         "domain": clean_domain,
-        "token": api_token
+        "account_id": data.get("accountId"),
+        "token": api_token,
     }
 
 def fetch_tickets(
@@ -46,26 +66,29 @@ def fetch_tickets(
     url = f"https://{domain}.atlassian.net/rest/api/3/search"
 
     jql = (
-        f'assignee = "{email}" '
-        f'AND statusCategory != Done '
-        f'ORDER BY updated DESC'
+        "assignee = currentUser() "
+        "AND statusCategory != Done "
+        "ORDER BY updated DESC"
     )
 
     params = {
         "jql": jql,
         "maxResults": 5,
-        "fields": "summary,status"
+        "fields": "summary,status",
     }
 
-    response = requests.get(
-        url,
-        params=params,
-        auth=HTTPBasicAuth(email, token),
-        timeout=15
-    )
+    try:
+        response = requests.get(
+            url,
+            params=params,
+            auth=HTTPBasicAuth(email, token),
+            headers={"Accept": "application/json"},
+            timeout=15,
+        )
+    except requests.RequestException:
+        return []
 
     if not response.ok:
-        print(response.text)
         return []
 
     data = response.json()

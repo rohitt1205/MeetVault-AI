@@ -222,6 +222,7 @@ __marimo__/
 /backend/uploaded_assets/
 /backend/chroma_db/
 /backend/chroma_db*/
+/backend/mcp_connections.json
 /chroma_db/
 
 # JavaScript / frontend

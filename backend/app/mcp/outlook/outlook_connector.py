@@ -1,8 +1,17 @@
-# Outlook connector linked to active user context
-def get_outlook_status(user_key: str = "demo"):
-    is_connected = user_key != "demo"
+from app.services.token_diagnostics_service import TokenDiagnosticsService
+
+
+def get_outlook_status(user_key: str = "demo", access_token: str | None = None):
+    diagnostics = TokenDiagnosticsService.inspect(access_token or "") if access_token else {}
+    is_connected = bool(diagnostics.get("is_graph_token"))
+    email = (
+        diagnostics.get("user_principal_name")
+        or (user_key if user_key != "demo" else None)
+    )
+
     return {
-        "connected": True,
+        "connected": is_connected,
         "provider": "microsoft",
-        "email": user_key if is_connected else "demo@microsoft.com"
+        "email": email,
+        "scopes": diagnostics.get("scopes", []),
     }

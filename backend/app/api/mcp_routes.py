@@ -1,3 +1,6 @@
+import os
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
@@ -46,20 +49,64 @@ def get_user_key_from_header(authorization: str | None) -> str:
 @router.get("/connections")
 def get_connections(authorization: str = Header(None)):
     user_key = get_user_key_from_header(authorization)
-    return MCPManager.get_all_connections(user_key)
+    token = None
+    if authorization:
+        scheme, _, candidate = authorization.partition(" ")
+        if scheme.lower() == "bearer" and candidate:
+            token = candidate
+    return MCPManager.get_all_connections(user_key, access_token=token)
 
 @router.get("/github/login")
 def github_login(user_key: str = Query("demo")):
-    url = MCPManager.get_github_login_url(user_key)
-    return RedirectResponse(url)
+    frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5173").rstrip("/")
+    try:
+        url = MCPManager.get_github_login_url(user_key)
+        return RedirectResponse(url)
+    except HTTPException as exc:
+        params = urlencode({
+            "github_connected": "false",
+            "mcp_error": str(exc.detail),
+        })
+        return RedirectResponse(url=f"{frontend_origin}/?{params}")
+    except Exception as exc:
+        params = urlencode({
+            "github_connected": "false",
+            "mcp_error": str(exc),
+        })
+        return RedirectResponse(url=f"{frontend_origin}/?{params}")
 
 @router.get("/github/callback")
-def github_callback(code: str, state: str = "demo"):
+def github_callback(code: str | None = None, state: str = "demo", error: str | None = None, error_description: str | None = None):
+    frontend_origin = os.getenv("FRONTEND_ORIGIN", "http://127.0.0.1:5173").rstrip("/")
+    if error:
+        params = urlencode({
+            "github_connected": "false",
+            "mcp_error": error_description or error,
+        })
+        return RedirectResponse(url=f"{frontend_origin}/?{params}")
+
+    if not code:
+        params = urlencode({
+            "github_connected": "false",
+            "mcp_error": "GitHub callback did not include an OAuth code.",
+        })
+        return RedirectResponse(url=f"{frontend_origin}/?{params}")
+
     try:
         MCPManager.connect_github(code, state)
-        return RedirectResponse(url="http://localhost:5173/?github_connected=true")
+        return RedirectResponse(url=f"{frontend_origin}/?github_connected=true")
+    except HTTPException as exc:
+        params = urlencode({
+            "github_connected": "false",
+            "mcp_error": str(exc.detail),
+        })
+        return RedirectResponse(url=f"{frontend_origin}/?{params}")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        params = urlencode({
+            "github_connected": "false",
+            "mcp_error": str(e),
+        })
+        return RedirectResponse(url=f"{frontend_origin}/?{params}")
 
 @router.post("/jira/connect")
 def connect_jira(req: JiraConnectRequest, authorization: str = Header(None)):
