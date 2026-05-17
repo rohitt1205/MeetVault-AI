@@ -21,7 +21,7 @@ def retrieve_and_answer(user_query: str) -> dict:
     if not retrieved_documents:
         return {
             "query": user_query,
-            "answer": "I don't have any meeting transcripts to answer that question.",
+            "answer": "Information not found in the provided context.",
             "sources": []
         }
         
@@ -34,11 +34,11 @@ def retrieve_and_answer(user_query: str) -> dict:
         query=user_query
     )
     
-    # 5. Call LLM
+    # 5. Call LLM with query and context for safety middleware validation
     try:
-        answer = generate_answer(final_prompt)
+        answer = generate_answer(final_prompt, query=user_query, context=context_text)
     except Exception as e:
-        answer = f"Error generating answer from LLM: {str(e)}"
+        answer = "Information not found in the provided context."
         
     return {
         "query": user_query,
