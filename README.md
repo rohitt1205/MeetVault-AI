@@ -2,7 +2,7 @@
 
 MeetVault AI is an AI-powered meeting intelligence platform that turns Microsoft Teams, SharePoint, and OneDrive meeting recordings into searchable knowledge. It ingests accessible meeting assets, generates transcripts when needed, stores transcript embeddings in ChromaDB, and answers user questions through a grounded RAG chat experience.
 
-The current implementation is focused on the working product flow, ingestion pipeline, vector storage, RAG retrieval, and MCP-ready tool integrations. Deployment details are intentionally not included yet.
+The current implementation is focused on the working product flow, ingestion pipeline, vector storage, RAG retrieval, MCP-ready tool integrations, and Docker-based EC2 deployment.
 
 ## Core Features
 
@@ -26,6 +26,7 @@ The current implementation is focused on the working product flow, ingestion pip
 - GitHub OAuth MCP scaffolding.
 - Outlook connector scaffolding.
 - Runtime ChromaDB files are ignored and not committed to Git.
+- Docker Compose deployment for EC2 with persistent ChromaDB volume.
 
 ## Tech Stack
 
@@ -54,6 +55,14 @@ The current implementation is focused on the working product flow, ingestion pip
 - Supabase for authentication and chat history.
 - ChromaDB for vector storage.
 - Local temporary backend files for recording downloads during transcription.
+- Docker volume storage for deployed ChromaDB data on EC2.
+
+### Deployment
+
+- Docker
+- Docker Compose
+- AWS EC2 Ubuntu
+- EC2 host Ollama service
 
 ## High-Level Architecture
 
@@ -105,6 +114,50 @@ flowchart TB
 ```
 
 ## Methodology
+
+### Implemented Contribution: Auth to Embeddings
+
+The implemented backend pipeline starts after Microsoft authentication and ends when transcript chunks are stored as embeddings in ChromaDB.
+
+1. The user signs in with Microsoft through Supabase Auth.
+2. Supabase returns the session plus the Microsoft provider token.
+3. The frontend sends that provider token as a bearer token to FastAPI.
+4. FastAPI validates that the token is a Microsoft Graph token, not only a Supabase JWT.
+5. The backend uses Microsoft Graph to discover accessible SharePoint, OneDrive, Teams, and calendar-linked meeting assets.
+6. The discovery layer filters for transcript files and real recording assets.
+7. Existing transcript files are parsed directly.
+8. Recording files are downloaded temporarily to the backend and validated as media.
+9. If no transcript exists, the recording is transcribed with faster-whisper.
+10. The transcript is normalized into timestamped speaker turns.
+11. The transcript is split into overlapping chunks with meeting metadata.
+12. Each chunk is embedded with Sentence Transformers.
+13. Chunks, vectors, and metadata are upserted into the `meetvault_transcripts` ChromaDB collection.
+14. The UI shows sync status, indexed chunk counts, and whether assets were embedded, reused, skipped, or failed.
+
+The transcription model is configured through:
+
+```env
+WHISPER_MODEL_SIZE=tiny
+WHISPER_DEVICE=cpu
+WHISPER_COMPUTE_TYPE=int8
+```
+
+For local development this can be changed to `base` for better transcription quality. For EC2 deployment, `tiny` is the safer default because it reduces RAM and CPU usage.
+
+The embedding model is configured through:
+
+```env
+EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
+```
+
+The vector store is configured through:
+
+```env
+CHROMA_DB_PATH=/data/chroma_db
+CHROMA_COLLECTION_NAME=meetvault_transcripts
+```
+
+On EC2, `/data/chroma_db` is backed by a Docker volume named `meetvault_data`, so indexed embeddings survive container restarts.
 
 ### 1. Authentication
 
@@ -287,9 +340,16 @@ Topic chips are optional. A user can click a topic to start with that context, o
 
 ```text
 MeetVault-AI/
+  .dockerignore
+  .env.example
+  .env.ec2.example
+  docker-compose.yml
+
   backend/
+    Dockerfile
     app/
       api/
+        deps.py
         graph_routes.py
         mcp_routes.py
       mcp/
@@ -304,9 +364,11 @@ MeetVault-AI/
         prompts.py
         router.py
       services/
+        answer_service.py
         chroma_service.py
         embedding_service.py
         ingestion_service.py
+        meeting_catalog_service.py
         meeting_service.py
         onedrive_service.py
         recording_service.py
@@ -323,9 +385,7 @@ MeetVault-AI/
       App.jsx
       App.css
 
-  scripts/
-  docs/
-  .env.example
+  supabase/
   README.md
 ```
 
@@ -357,6 +417,8 @@ WHISPER_COMPUTE_TYPE=int8
 RAG_MODEL=qwen2.5:7b
 OLLAMA_HOST=http://127.0.0.1:11434
 ```
+
+For EC2, copy `.env.ec2.example` to `.env.ec2` and fill the public EC2 URL plus Supabase values.
 
 ## Local Setup
 
@@ -423,6 +485,105 @@ Useful backend checks:
 Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/vector-store/status" | Select-Object -ExpandProperty Content
 Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/ingestion/workspace-status" | Select-Object -ExpandProperty Content
 Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/ingestion/status" | Select-Object -ExpandProperty Content
+```
+
+## EC2 Deployment
+
+MeetVault is deployed on an Ubuntu EC2 instance with Docker Compose.
+
+Recommended instance:
+
+```text
+m7i-flex.large or larger
+```
+
+Minimum practical resources:
+
+```text
+8 GB RAM
+40-60 GB EBS storage
+```
+
+Required inbound security group ports:
+
+```text
+22    SSH
+4173  Frontend
+8080  Backend API
+```
+
+Deployment steps on EC2:
+
+```bash
+sudo apt update
+sudo apt install -y docker.io docker-compose-plugin git
+sudo usermod -aG docker ubuntu
+```
+
+Log out and log in again, then:
+
+```bash
+git clone https://github.com/rohitt1205/MeetVault-AI.git
+cd MeetVault-AI
+cp .env.ec2.example .env.ec2
+nano .env.ec2
+```
+
+Fill:
+
+```env
+VITE_API_BASE_URL=http://YOUR_EC2_PUBLIC_IP:8080
+FRONTEND_ORIGIN=http://YOUR_EC2_PUBLIC_IP:4173
+FRONTEND_ORIGINS=http://YOUR_EC2_PUBLIC_IP:4173,http://localhost:5173,http://127.0.0.1:5173
+VITE_SUPABASE_URL=your_supabase_url
+VITE_SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
+RAG_MODEL=qwen2.5:7b
+OLLAMA_HOST=http://host.docker.internal:11434
+```
+
+Start Ollama on the EC2 host:
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+OLLAMA_HOST=0.0.0.0:11434 ollama serve
+```
+
+In another SSH session:
+
+```bash
+ollama pull qwen2.5:7b
+docker compose --env-file .env.ec2 up --build -d
+```
+
+Health checks:
+
+```bash
+docker compose ps
+curl http://localhost:8080/
+curl -I http://localhost:4173
+```
+
+Expected backend response:
+
+```json
+{"message":"MeetVault AI Backend Running"}
+```
+
+Open the app:
+
+```text
+http://YOUR_EC2_PUBLIC_IP:4173
+```
+
+Supabase Auth must include the deployed frontend URL:
+
+```text
+Site URL: http://YOUR_EC2_PUBLIC_IP:4173
+Redirect URLs:
+http://YOUR_EC2_PUBLIC_IP:4173
+http://YOUR_EC2_PUBLIC_IP:4173/**
+http://localhost:5173
+http://127.0.0.1:5173
 ```
 
 ## Current Limitations
