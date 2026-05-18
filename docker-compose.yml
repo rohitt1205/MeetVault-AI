@@ -1,0 +1,49 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: meetvault-ai-backend
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      GRAPH_BASE_URL: "https://graph.microsoft.com/v1.0"
+      GRAPH_TIMEOUT_SECONDS: "${GRAPH_TIMEOUT_SECONDS:-60}"
+      CHROMA_DB_PATH: "/data/chroma_db"
+      CHROMA_COLLECTION_NAME: "${CHROMA_COLLECTION_NAME:-meetvault_transcripts}"
+      EMBEDDING_MODEL_NAME: "${EMBEDDING_MODEL_NAME:-all-MiniLM-L6-v2}"
+      WHISPER_MODEL_SIZE: "${WHISPER_MODEL_SIZE:-tiny}"
+      WHISPER_DEVICE: "${WHISPER_DEVICE:-cpu}"
+      WHISPER_COMPUTE_TYPE: "${WHISPER_COMPUTE_TYPE:-int8}"
+      MCP_CONNECTION_STORE_PATH: "/data/mcp_connections.json"
+      FRONTEND_ORIGIN: "${FRONTEND_ORIGIN:-http://localhost:4173}"
+      FRONTEND_ORIGINS: "${FRONTEND_ORIGINS:-http://localhost:4173,http://localhost:5173,http://127.0.0.1:5173}"
+      RAG_MODEL: "${RAG_MODEL:-qwen2.5:7b}"
+      OLLAMA_HOST: "${OLLAMA_HOST:-http://host.docker.internal:11434}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - meetvault_data:/data
+    restart: unless-stopped
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "4173:4173"
+    environment:
+      VITE_API_BASE_URL: "${VITE_API_BASE_URL:-http://localhost:8080}"
+      VITE_SUPABASE_URL: "${VITE_SUPABASE_URL}"
+      VITE_SUPABASE_PUBLISHABLE_KEY: "${VITE_SUPABASE_PUBLISHABLE_KEY}"
+    command: sh -c "npm install && npm run build && npm run preview -- --host 0.0.0.0 --port 4173"
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+volumes:
+  meetvault_data:
+  frontend_node_modules:
