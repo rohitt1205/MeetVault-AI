@@ -78,6 +78,7 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+test.ipynb
 
 # IPython
 profile_default/
@@ -221,6 +222,9 @@ __marimo__/
 
 /backend/uploaded_assets/
 /backend/chroma_db/
+/backend/chroma_db*/
+/backend/mcp_connections.json
+/chroma_db/
 
 # JavaScript / frontend
 node_modules/

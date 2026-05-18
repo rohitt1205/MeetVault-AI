@@ -10,9 +10,9 @@ from app.rag.dummy_data import DUMMY_MEETING_TRANSCRIPT
 from app.rag.ingest import ingest_transcript
 from app.rag.retrieve import retrieve_and_answer
 
-
 def run_e2e_test():
     print("=== Starting RAG End-to-End Test ===")
+
     print(f"Using local Ollama SLM: {os.getenv('RAG_MODEL', 'qwen2.5:7b')}")
 
     print("\n1. Ingesting dummy transcript...")

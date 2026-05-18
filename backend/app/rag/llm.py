@@ -20,6 +20,7 @@ def _get_available_qwen_model() -> str:
     configured_model = (os.getenv("RAG_MODEL") or "").strip()
     default_model = "qwen2.5:7b"
     preferred_model = configured_model or default_model
+
     try:
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
         response.raise_for_status()
@@ -45,7 +46,7 @@ def _get_available_qwen_model() -> str:
     return preferred_model
 
 
-def _generate_with_ollama(prompt: str, model_name: str) -> str:
+def _generate_with_ollama(prompt: str, model_name: str, *, temperature: float = 0.0) -> str:
     if not model_name:
         raise ValueError("RAG_MODEL must be set. Example: qwen2.5:7b")
 
@@ -55,7 +56,7 @@ def _generate_with_ollama(prompt: str, model_name: str) -> str:
             "model": model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": 0.0, "top_p": 0.1},
+            "options": {"temperature": temperature, "top_p": 0.9 if temperature > 0 else 0.1},
         },
         timeout=60,
     )
@@ -65,29 +66,8 @@ def _generate_with_ollama(prompt: str, model_name: str) -> str:
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _generate_with_qwen(prompt: str) -> str:
-    return _generate_with_ollama(prompt, _get_available_qwen_model())
-
-
-def _generate_with_ollama_options(
-    prompt: str,
-    model_name: str,
-    *,
-    temperature: float = 0.0,
-) -> str:
-    response = requests.post(
-        f"{OLLAMA_BASE_URL}/api/generate",
-        json={
-            "model": model_name,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": temperature, "top_p": 0.9},
-        },
-        timeout=60,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    return (payload.get("response") or "").strip()
+def _generate_with_qwen(prompt: str, *, temperature: float = 0.0) -> str:
+    return _generate_with_ollama(prompt, _get_available_qwen_model(), temperature=temperature)
 
 
 def generate_answer(
@@ -104,15 +84,7 @@ def generate_answer(
     if query and not SafetyMiddleware.validate_input(query):
         return fallback_response
 
-    model_name = _get_available_qwen_model()
-    if temperature > 0:
-        answer = _generate_with_ollama_options(
-            prompt,
-            model_name,
-            temperature=temperature,
-        )
-    else:
-        answer = _generate_with_ollama(prompt, model_name)
+    answer = _generate_with_qwen(prompt, temperature=temperature)
 
     return SafetyMiddleware.sanitize_output(
         SafetyMiddleware.validate_output(answer, context=context, query=query)

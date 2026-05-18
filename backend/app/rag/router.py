@@ -4,6 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import get_access_token
+from app.api.mcp_routes import get_user_key_from_header
 from app.rag.dummy_data import DUMMY_MEETING_TRANSCRIPT
 from app.rag.ingest import ingest_transcript
 from app.rag.retrieve import retrieve_and_answer
@@ -57,7 +58,12 @@ def query_rag(request: QueryRequest, authorization: str = Header(None)):
     """
     get_access_token(authorization)
     try:
-        result = retrieve_and_answer(request.query, meeting_id=request.meeting_id)
+        user_key = get_user_key_from_header(authorization)
+        result = retrieve_and_answer(
+            request.query,
+            meeting_id=request.meeting_id,
+            user_key=user_key,
+        )
         return result
     except Exception as exc:
         logger.exception("RAG query failed")

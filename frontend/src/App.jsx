@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
+import MCPPanel from './components/mcp/MCPPanel'
 import MeetingsGridView from './views/MeetingsGridView'
 import MeetingChatView from './views/MeetingChatView'
 import WorkspaceLanding from './views/WorkspaceLanding'
@@ -170,6 +171,8 @@ function App() {
   const [pipelineNotice, setPipelineNotice] = useState('')
 
   const graphToken = session?.provider_token || ''
+  const supabaseToken = session?.access_token || ''
+  const backendToken = graphToken || supabaseToken
   const user = session?.user
   const userId = user?.id
 
@@ -1469,16 +1472,19 @@ function App() {
                 </button>
               </div>
             ) : (
-              <div className="server-list">
-                {mcpServers.map((server) => (
-                  <article className="server-row" key={server.id}>
-                    <div>
-                      <h4>{server.name}</h4>
-                      <p>{server.description}</p>
-                    </div>
-                    <span className="result-badge">{server.status}</span>
-                  </article>
-                ))}
+              <div className="mcp-settings-container">
+                <div className="server-list" style={{ marginBottom: '24px' }}>
+                  {mcpServers.map((server) => (
+                    <article className="server-row" key={server.id}>
+                      <div>
+                        <h4>{server.name}</h4>
+                        <p>{server.description}</p>
+                      </div>
+                      <span className="result-badge">{server.status}</span>
+                    </article>
+                  ))}
+                </div>
+                <MCPPanel token={backendToken} userEmail={user?.email} />
               </div>
             )}
           </section>

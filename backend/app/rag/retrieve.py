@@ -1,10 +1,11 @@
 import re
 
+from app.mcp.mcp_manager import MCPManager
+from app.rag.llm import generate_answer, generate_conversational_answer
+from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT
+from app.services.answer_service import AnswerService
 from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
-from app.services.answer_service import AnswerService
-from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT
-from app.rag.llm import generate_answer, generate_conversational_answer
 
 QUERYABLE_SOURCE_TYPES = MICROSOFT_SOURCE_TYPES | {"rag_manual_ingest"}
 
@@ -36,6 +37,19 @@ STOPWORDS = {
     "what",
 }
 LOW_SIGNAL_WORDS = {"ah", "hmm", "okay", "ok", "um", "uh", "yeah", "yes", "you"}
+JIRA_KEYWORDS = {
+    "jira",
+    "ticket",
+    "tickets",
+    "assigned",
+    "task",
+    "tasks",
+    "issue",
+    "issues",
+    "sprint",
+}
+
+NOT_FOUND_ANSWER = "Information not found in the provided context."
 
 
 def _tokens(value: str) -> set[str]:
@@ -161,9 +175,6 @@ def _is_queryable_source(source: dict) -> bool:
     )
 
 
-NOT_FOUND_ANSWER = "Information not found in the provided context."
-
-
 def _is_not_found_answer(answer: str) -> bool:
     normalized = (answer or "").strip().lower()
     if normalized == NOT_FOUND_ANSWER.lower():
@@ -248,14 +259,39 @@ def _generate_conversational_response(user_query: str, sources: list[dict]) -> d
     }
 
 
-def _clarify_without_context(user_query: str, sources: list[dict]) -> dict:
-    return _generate_conversational_response(user_query, sources)
+def _append_jira_context(user_query: str, user_key: str, sources: list[dict]) -> tuple[str, list[dict]]:
+    query_terms = _tokens(user_query)
+    if not query_terms & JIRA_KEYWORDS:
+        return "", sources
+
+    jira_tickets = MCPManager.get_jira_tickets(user_key)
+    if not jira_tickets:
+        return "", sources
+
+    jira_context = "\n".join(
+        f"[{ticket['ticket_id']}] {ticket['summary']} (Status: {ticket['status']})"
+        for ticket in jira_tickets
+    )
+    mcp_source = {
+        "chunk_id": "mcp-jira-live",
+        "distance": 0.0,
+        "text": f"Found {len(jira_tickets)} live Jira ticket(s) assigned to {user_key}.",
+        "metadata": {
+            "source_type": "mcp_jira",
+            "meeting_title": "Jira Workspace",
+            "meeting_id": "mcp-jira-live",
+        },
+    }
+    return f"\n\n---\n\nSource: Jira Workspace\n{jira_context}", [*sources, mcp_source]
 
 
-def retrieve_and_answer(user_query: str, meeting_id: str | None = None) -> dict:
+def retrieve_and_answer(
+    user_query: str,
+    meeting_id: str | None = None,
+    user_key: str = "demo",
+) -> dict:
     """
-    Retrieves relevant transcript chunks from ChromaDB based on the user query,
-    constructs a prompt, and calls the LLM to get a grounded answer.
+    Retrieves relevant transcript chunks from ChromaDB and generates a grounded answer.
     """
     query_embedding = EmbeddingService.generate_query_embedding(user_query)
 
@@ -295,12 +331,14 @@ def retrieve_and_answer(user_query: str, meeting_id: str | None = None) -> dict:
         [source for source in candidate_sources if _is_queryable_source(source)],
     )
 
+    jira_context, sources = _append_jira_context(user_query, user_key, sources)
+
     if not sources:
         return {
             "query": user_query,
             "answer": (
                 "I found embeddings in ChromaDB, but none from Microsoft Graph, "
-                "SharePoint, or OneDrive recordings matched this query yet."
+                "SharePoint, OneDrive recordings, or connected MCP tools matched this query yet."
             ),
             "answer_mode": "no_microsoft_context",
             "sources": [],
@@ -312,7 +350,9 @@ def retrieve_and_answer(user_query: str, meeting_id: str | None = None) -> dict:
     context_text = "\n\n---\n\n".join(
         f"Source: {(source.get('metadata') or {}).get('meeting_title') or 'Untitled meeting'}\n{source.get('text') or ''}"
         for source in sources
+        if (source.get("metadata") or {}).get("source_type") != "mcp_jira"
     )
+    context_text = f"{context_text}{jira_context}".strip()
 
     safe_query = user_query.replace("{", "{{").replace("}", "}}")
     final_prompt = RAG_SYSTEM_PROMPT.format(
