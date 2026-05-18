@@ -1,0 +1,41 @@
+app = "meetvault-ai-backend"
+primary_region = "sin"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[env]
+  PORT = "8080"
+  CHROMA_DB_PATH = "/data/chroma_db"
+  CHROMA_COLLECTION_NAME = "meetvault_transcripts"
+  MCP_CONNECTION_STORE_PATH = "/data/mcp_connections.json"
+  GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+  GRAPH_TIMEOUT_SECONDS = "60"
+  EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
+  WHISPER_MODEL_SIZE = "base"
+  WHISPER_DEVICE = "cpu"
+  WHISPER_COMPUTE_TYPE = "int8"
+
+[[mounts]]
+  source = "meetvault_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 2048
