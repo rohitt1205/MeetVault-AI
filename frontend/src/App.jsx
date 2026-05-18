@@ -1201,7 +1201,10 @@ function App() {
   const handleAuth = async () => {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'azure',
-      options: { scopes: REQUIRED_LOGIN_SCOPES },
+      options: {
+        scopes: REQUIRED_LOGIN_SCOPES,
+        redirectTo: window.location.origin,
+      },
     })
     if (error) console.error(error)
   }
