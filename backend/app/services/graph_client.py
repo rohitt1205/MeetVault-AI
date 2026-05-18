@@ -1,4 +1,5 @@
 import os
+import time
 from urllib.parse import quote
 
 import requests
@@ -9,6 +10,7 @@ load_dotenv()
 
 GRAPH_BASE_URL = os.getenv("GRAPH_BASE_URL", "https://graph.microsoft.com/v1.0")
 GRAPH_TIMEOUT_SECONDS = int(os.getenv("GRAPH_TIMEOUT_SECONDS", "30"))
+GRAPH_MAX_RETRIES = int(os.getenv("GRAPH_MAX_RETRIES", "4"))
 
 
 class GraphClient:
@@ -43,17 +45,51 @@ class GraphClient:
         json: dict | None = None,
         extra_headers: dict | None = None,
     ) -> requests.Response:
-        try:
-            response = requests.request(
-                method=method,
-                url=GraphClient._url(endpoint),
-                headers=GraphClient._headers(access_token, extra_headers),
-                params=params,
-                json=json,
-                timeout=GRAPH_TIMEOUT_SECONDS,
+        last_response: requests.Response | None = None
+
+        for attempt in range(GRAPH_MAX_RETRIES):
+            try:
+                response = requests.request(
+                    method=method,
+                    url=GraphClient._url(endpoint),
+                    headers=GraphClient._headers(access_token, extra_headers),
+                    params=params,
+                    json=json,
+                    timeout=GRAPH_TIMEOUT_SECONDS,
+                )
+            except requests.exceptions.RequestException as exc:
+                raise HTTPException(status_code=502, detail=f"Graph request failed: {exc}") from exc
+
+            last_response = response
+            if response.status_code < 400:
+                return response
+
+            graph_code = None
+            try:
+                payload = response.json()
+                if isinstance(payload, dict):
+                    graph_code = (payload.get("error") or {}).get("code")
+            except ValueError:
+                graph_code = None
+
+            is_throttled = (
+                response.status_code == 429
+                or graph_code in {"ApplicationThrottled", "TooManyRequests", "activityLimitReached"}
             )
-        except requests.exceptions.RequestException as exc:
-            raise HTTPException(status_code=502, detail=f"Graph request failed: {exc}") from exc
+            if is_throttled and attempt < GRAPH_MAX_RETRIES - 1:
+                retry_after = response.headers.get("Retry-After")
+                try:
+                    delay_seconds = max(1, int(retry_after))
+                except (TypeError, ValueError):
+                    delay_seconds = min(30, 2 ** attempt)
+                time.sleep(delay_seconds)
+                continue
+
+            break
+
+        response = last_response
+        if response is None:
+            raise HTTPException(status_code=502, detail="Graph request failed without a response.")
 
         if response.status_code >= 400:
             detail = {
@@ -200,10 +236,17 @@ class GraphClient:
         return response.json()
 
     @staticmethod
-    def get_collection(endpoint: str, access_token: str, params: dict | None = None) -> list:
+    def get_collection(
+        endpoint: str,
+        access_token: str,
+        params: dict | None = None,
+        *,
+        max_pages: int | None = None,
+    ) -> list:
         items = []
         next_endpoint = endpoint
         next_params = params
+        pages_read = 0
 
         while next_endpoint:
             response = GraphClient.get(
@@ -212,6 +255,9 @@ class GraphClient:
                 params=next_params,
             )
             items.extend(response.get("value", []))
+            pages_read += 1
+            if max_pages is not None and pages_read >= max_pages:
+                break
             next_endpoint = response.get("@odata.nextLink")
             next_params = None
 

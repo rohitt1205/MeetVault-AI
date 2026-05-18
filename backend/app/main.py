@@ -1,9 +1,13 @@
 import os
+from pathlib import Path
 
+from dotenv import load_dotenv
 from fastapi import FastAPI
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+load_dotenv()
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.graph_routes import router as graph_router
-from app.rag.router import router as rag_router
 from app.rag.router import router as rag_router
 
 app = FastAPI()
@@ -38,6 +42,4 @@ def home():
 
 
 app.include_router(graph_router)
-app.include_router(rag_router)
-
 app.include_router(rag_router)

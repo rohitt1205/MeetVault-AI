@@ -1,28 +1,55 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
+import MeetingsGridView from './views/MeetingsGridView'
+import MeetingChatView from './views/MeetingChatView'
+import WorkspaceLanding from './views/WorkspaceLanding'
+import {
+  CHAT_HISTORY_TABLE,
+  CHAT_SELECT_FIELDS,
+  ingestionStatusUnchanged,
+  isChatPreparing,
+  isChatReady,
+  mapMeetingChatRow,
+  MEETING_CHAT_LEGACY_QUERY,
+  sanitizeChatPatch,
+  shouldStartIngestion,
+} from './utils/meetingChat'
 import './App.css'
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-const CHAT_HISTORY_TABLE = 'chat_history'
-const STATUS_POLL_MS = 5000
+// In dev, use Vite proxy (/api → backend) so the API stays reachable during long syncs.
+const API_BASE_URL = import.meta.env.DEV
+  ? '/api'
+  : import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
+const INGESTION_POLL_MS = 2500
+const CATALOG_SYNC_MS = 5 * 60 * 1000
 const REQUIRED_LOGIN_SCOPES =
   'openid profile email offline_access User.Read Calendars.Read Files.Read OnlineMeetings.Read OnlineMeetingTranscript.Read.All'
 const THEME_STORAGE_KEY = 'meetvault-theme'
+const SUMMARY_PROMPT =
+  'Provide a concise executive summary of this meeting: key topics, decisions, action items, and open questions.'
 
 const mcpServers = [
   {
     id: 'graph',
     name: 'Microsoft Graph',
-    status: 'Workspace sync',
-    description: 'Uses admin-consented Microsoft Graph scopes to fetch meetings, SharePoint recordings, and transcripts.',
+    status: 'Meeting catalog',
+    description: 'Discovers Teams calendar meetings with recordings. Ingestion runs when you open a meeting chat.',
   },
   {
     id: 'rag',
     name: 'RAG Layer',
     status: 'Grounded answers',
-    description: 'MeetVault now queries ChromaDB and composes grounded answers on top of stored transcript chunks.',
+    description: 'Queries ChromaDB and composes grounded answers from indexed transcript chunks.',
   },
 ]
+
+const bearerHeaders = (token, extraHeaders = {}) => {
+  const headers = { ...extraHeaders }
+  if (token) {
+    headers.Authorization = `Bearer ${token}`
+  }
+  return headers
+}
 
 const readErrorMessage = async (response, fallbackMessage) => {
   try {
@@ -32,10 +59,14 @@ const readErrorMessage = async (response, fallbackMessage) => {
     try {
       const parsed = JSON.parse(raw)
       if (typeof parsed.detail === 'string') return parsed.detail
-      if (typeof parsed.detail?.message === 'string') return parsed.detail.message
+      if (typeof parsed.detail === 'object' && parsed.detail) {
+        if (typeof parsed.detail.graph_message === 'string') return parsed.detail.graph_message
+        if (typeof parsed.detail.message === 'string') return parsed.detail.message
+      }
+      if (typeof parsed.sync_error === 'string') return parsed.sync_error
       if (typeof parsed.message === 'string') return parsed.message
     } catch {
-      // keep the raw response below
+      // keep raw
     }
 
     return raw
@@ -45,37 +76,57 @@ const readErrorMessage = async (response, fallbackMessage) => {
 }
 
 const formatDateTime = (value) => {
-  if (!value) return 'Waiting for the first sync'
-
+  if (!value) return ''
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return value
   return parsed.toLocaleString()
 }
 
-const mapHistoryRow = (row) => ({
-  id: row.id,
-  title: row.title,
-  preview: row.preview || (row.meeting_title ? `Context: ${row.meeting_title}` : ''),
-  query: row.query,
-  meetingId: row.meeting_id,
-  meetingTitle: row.meeting_title,
-  createdAt: row.created_at,
-})
+const catalogSummaryForMeeting = (meeting, isIndexed) => {
+  const source = meeting.content_source || meeting.contentSource || 'teams'
+  const isOnedrive = source === 'onedrive' || source === 'shared_onedrive'
+  const tags = meeting.tags || []
 
-const answerEyebrowForMode = (mode) => {
-  switch (mode) {
-    case 'gemini':
-      return 'Grounded answer'
-    case 'extractive_summary':
-      return 'Fallback summary'
-    case 'retrieval_brief':
-      return 'Fallback brief'
-    case 'retrieval_only':
-      return 'Retrieved context'
-    case 'no_context':
-      return 'No context found'
-    default:
-      return 'Retrieved answer'
+  if (isIndexed) {
+    return 'Indexed and ready for chat.'
+  }
+  if (isOnedrive || tags.includes('OneDrive')) {
+    return 'Video on OneDrive — preparation runs when you open the chat.'
+  }
+  return 'Recording available — preparation runs when you open the chat.'
+}
+
+const patchCatalogMeetingIndexed = (meetings, meetingId, isIndexed) =>
+  meetings.map((meeting) =>
+    meeting.id === meetingId
+      ? {
+          ...meeting,
+          isIndexed,
+          summary: catalogSummaryForMeeting(meeting, isIndexed),
+        }
+      : meeting,
+  )
+
+const normalizeCatalogMeeting = (meeting) => {
+  const source = meeting.content_source || 'teams'
+  const isOnedrive = source === 'onedrive' || source === 'shared_onedrive'
+
+  return {
+    id: meeting.event_id || meeting.meeting_id,
+    title: meeting.title || 'Untitled meeting',
+    team: meeting.organizer || (isOnedrive ? 'OneDrive' : 'Microsoft Teams'),
+    time: formatDateTime(meeting.start_time) || 'Recent',
+    startTimeIso: meeting.start_time || null,
+    summary: meeting.is_indexed
+      ? 'Indexed and ready for chat.'
+      : isOnedrive
+        ? 'Video on OneDrive — preparation runs when you open the chat.'
+        : 'Recording available — preparation runs when you open the chat.',
+    tags: isOnedrive
+      ? [meeting.organizer === 'Shared with me' ? 'Shared' : 'OneDrive', 'Video']
+      : ['Teams', 'Recording'],
+    isIndexed: Boolean(meeting.is_indexed),
+    hasRecording: Boolean(meeting.has_recording),
   }
 }
 
@@ -85,25 +136,56 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [settingsView, setSettingsView] = useState('appearance')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || 'light')
+
+  const [activeNav, setActiveNav] = useState('workspace')
+  const [meetingChats, setMeetingChats] = useState([])
+  const [activeChatId, setActiveChatId] = useState('')
+  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
+  const [historyError, setHistoryError] = useState('')
+
+  const [catalogMeetings, setCatalogMeetings] = useState([])
+  const [catalogSyncedAt, setCatalogSyncedAt] = useState(null)
+  const [catalogLoading, setCatalogLoading] = useState(false)
+  const [catalogSyncing, setCatalogSyncing] = useState(false)
+  const [catalogError, setCatalogError] = useState('')
+
+  const [ingestionByMeeting, setIngestionByMeeting] = useState({})
+  const summaryRequestedRef = useRef(new Set())
+  const summarySkippedRef = useRef(new Set())
+  const ingestionStartAttemptedRef = useRef(new Set())
+  const activeChatIdRef = useRef('')
+  const meetingChatsRef = useRef([])
+  const ingestionByMeetingRef = useRef({})
+  const graphTokenRef = useRef('')
+  const pollIngestionRef = useRef(async () => {})
+  const catalogSyncInFlightRef = useRef(false)
+  const catalogBootstrapDoneRef = useRef(false)
+  const syncCatalogRef = useRef(null)
+  const lastBackendWarnAtRef = useRef(0)
+
   const [query, setQuery] = useState('')
   const [isSearching, setIsSearching] = useState(false)
-  const [conversationTurns, setConversationTurns] = useState([])
-  const [activeConversationRecordId, setActiveConversationRecordId] = useState('')
+  const [isDeletingChat, setIsDeletingChat] = useState(false)
   const [searchMessage, setSearchMessage] = useState('')
   const [pipelineNotice, setPipelineNotice] = useState('')
-  const [historyError, setHistoryError] = useState('')
-  const [vectorStoreStatus, setVectorStoreStatus] = useState(null)
-  const [workspaceSyncStatus, setWorkspaceSyncStatus] = useState(null)
-  const [ingestionStatuses, setIngestionStatuses] = useState([])
-  const [history, setHistory] = useState([])
-  const [activeHistoryId, setActiveHistoryId] = useState('')
-  const [isHistoryLoading, setIsHistoryLoading] = useState(false)
 
   const graphToken = session?.provider_token || ''
-  const supabaseToken = session?.access_token || ''
-  const backendToken = graphToken || supabaseToken
   const user = session?.user
   const userId = user?.id
+
+  meetingChatsRef.current = meetingChats
+  ingestionByMeetingRef.current = ingestionByMeeting
+  graphTokenRef.current = graphToken
+  activeChatIdRef.current = activeChatId
+
+  const activeChat = useMemo(
+    () => meetingChats.find((chat) => chat.id === activeChatId) || null,
+    [activeChatId, meetingChats],
+  )
+
+  const activeIngestion = activeChat?.meetingId
+    ? ingestionByMeeting[activeChat.meetingId]
+    : null
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -125,92 +207,14 @@ function App() {
       provider: 'Azure OAuth via Supabase',
       tenant: metadata.tid || metadata.tenant_id || 'Azure workspace',
       tokenType: graphToken ? 'Microsoft Graph provider token' : 'Supabase access token',
-      token: backendToken || 'No token',
+      token: graphToken || session?.access_token || 'No token',
     }
-  }, [backendToken, graphToken, user])
+  }, [graphToken, session?.access_token, user])
 
-  const loadVectorStoreStatus = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/vector-store/status`)
-      if (!response.ok) {
-        throw new Error(await readErrorMessage(response, 'Unable to read ChromaDB status.'))
-      }
-
-      const payload = await response.json()
-      setVectorStoreStatus(payload)
-      return payload
-    } catch (error) {
-      console.error(error)
-      return null
-    }
-  }, [])
-
-  const loadIngestionStatuses = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/ingestion/status`)
-      if (!response.ok) {
-        throw new Error(await readErrorMessage(response, 'Unable to read ingestion status.'))
-      }
-
-      const payload = await response.json()
-      setIngestionStatuses(Array.isArray(payload) ? payload : [])
-      return payload
-    } catch (error) {
-      console.error(error)
-      return []
-    }
-  }, [])
-
-  const loadWorkspaceSyncStatus = useCallback(async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/ingestion/workspace-status`)
-      if (!response.ok) {
-        throw new Error(await readErrorMessage(response, 'Unable to read workspace sync status.'))
-      }
-
-      const payload = await response.json()
-      setWorkspaceSyncStatus(payload)
-      return payload
-    } catch (error) {
-      console.error(error)
-      return null
-    }
-  }, [])
-
-  const startGraphWorkspaceSync = useCallback(async () => {
-    if (!graphToken) {
-      setPipelineNotice('Microsoft Graph token is not available. Sign out and sign in again before starting workspace sync.')
-      return null
-    }
-
-    try {
-      const response = await fetch(`${API_BASE_URL}/ingestion/workspace-sync?limit=20`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${graphToken}`,
-        },
-      })
-
-      if (!response.ok) {
-        throw new Error(await readErrorMessage(response, 'Graph workspace sync could not start.'))
-      }
-
-      const payload = await response.json()
-      setWorkspaceSyncStatus(payload)
-      setPipelineNotice('Microsoft Graph workspace sync started. Large recordings can take several minutes while MeetVault downloads, transcribes, chunks, embeds, and stores them.')
-      await Promise.all([loadVectorStoreStatus(), loadWorkspaceSyncStatus(), loadIngestionStatuses()])
-      return payload
-    } catch (error) {
-      console.error(error)
-      setPipelineNotice(error.message || 'Graph workspace sync could not start.')
-      return null
-    }
-  }, [graphToken, loadIngestionStatuses, loadVectorStoreStatus, loadWorkspaceSyncStatus])
-
-  const loadHistory = useCallback(async () => {
+  const loadMeetingChats = useCallback(async () => {
     if (!userId) {
-      setHistory([])
-      setActiveHistoryId('')
+      setMeetingChats([])
+      setActiveChatId('')
       return
     }
 
@@ -219,231 +223,809 @@ function App() {
 
     const { data, error } = await supabase
       .from(CHAT_HISTORY_TABLE)
-      .select('id,title,preview,query,meeting_id,meeting_title,created_at')
+      .select(CHAT_SELECT_FIELDS)
       .eq('user_id', userId)
+      .not('meeting_id', 'is', null)
       .order('created_at', { ascending: false })
 
     if (error) {
-      console.error('History load failed:', error)
-      setHistoryError('History could not be loaded.')
-      setHistory([])
-      setActiveHistoryId('')
+      console.error('Meeting chats load failed:', error)
+      setHistoryError('Meeting chats could not be loaded.')
+      setMeetingChats([])
+      setActiveChatId('')
     } else {
-      const rows = data.map(mapHistoryRow)
-      setHistory(rows)
-      setActiveHistoryId((currentId) =>
-        rows.some((item) => item.id === currentId) ? currentId : rows[0]?.id || '',
+      const rows = (data || []).map(mapMeetingChatRow)
+      setMeetingChats(rows)
+      setActiveChatId((current) =>
+        rows.some((item) => item.id === current) ? current : rows[0]?.id || '',
       )
     }
 
     setIsHistoryLoading(false)
   }, [userId])
 
-  const sortedIngestionStatuses = useMemo(
-    () =>
-      [...ingestionStatuses].sort((left, right) => {
-        const leftTime = Date.parse(left.updated_at || '') || 0
-        const rightTime = Date.parse(right.updated_at || '') || 0
-        return rightTime - leftTime
-      }),
-    [ingestionStatuses],
-  )
+  const upsertMeetingChat = useCallback(
+    async ({ meetingId, title, status, messages }) => {
+      if (!userId) return null
 
-  const latestEmbedded = sortedIngestionStatuses.find((status) => status.status === 'EMBEDDED')
-  const latestActiveIngestion = sortedIngestionStatuses.find((status) =>
-    ['QUEUED', 'PROCESSING'].includes(status.status),
-  )
-  const latestFailedIngestion = sortedIngestionStatuses.find((status) => status.status === 'FAILED')
-  const latestSkippedIngestion = sortedIngestionStatuses.find((status) => status.status === 'SKIPPED')
-  const formatStatusDetail = (detail) => {
-    if (!detail) return ''
-    if (typeof detail === 'string') return detail
-    return detail.message || detail.graph_message || detail.error || JSON.stringify(detail)
-  }
-  const graphSyncSummary = useMemo(() => {
-    if (!workspaceSyncStatus?.status || workspaceSyncStatus.status === 'IDLE') {
-      return 'Graph workspace sync is idle. Sign in or click Sync workspace now to check recent meetings.'
-    }
-
-    if (['QUEUED', 'RUNNING'].includes(workspaceSyncStatus.status)) {
-      return workspaceSyncStatus.message ||
-        'Graph workspace sync is running. Long recordings may take several minutes to download, transcribe, embed, and store.'
-    }
-
-    if (workspaceSyncStatus.status === 'COMPLETED') {
-      const embedded = workspaceSyncStatus.embedded ?? 0
-      const alreadyIndexed = workspaceSyncStatus.already_indexed ?? 0
-      const ignored = workspaceSyncStatus.ignored ?? 0
-      const failed = workspaceSyncStatus.failed ?? 0
-      return workspaceSyncStatus.message ||
-        `Graph workspace sync finished. Embedded ${embedded} new item${embedded === 1 ? '' : 's'}, reused ${alreadyIndexed} already indexed item${alreadyIndexed === 1 ? '' : 's'}, ignored ${ignored} non-transcribable item${ignored === 1 ? '' : 's'}, failed ${failed}.`
-    }
-
-    if (workspaceSyncStatus.status === 'FAILED') {
-      const detail =
-        typeof workspaceSyncStatus.error_detail === 'string'
-          ? workspaceSyncStatus.error_detail
-          : workspaceSyncStatus.error_detail?.message ||
-            workspaceSyncStatus.error_detail?.graph_message ||
-            ''
-      return `Graph workspace sync failed${detail ? `: ${detail}` : '.'}`
-    }
-
-    return workspaceSyncStatus.message || `Graph workspace sync status: ${workspaceSyncStatus.status}`
-  }, [workspaceSyncStatus])
-
-  const indexedCount = vectorStoreStatus?.indexed_document_count ?? 0
-  const totalCount = vectorStoreStatus?.document_count ?? 0
-  const sourceCountEntries = Object.entries(vectorStoreStatus?.source_counts || {}).sort(
-    (left, right) => right[1] - left[1],
-  )
-  const hasConversation = conversationTurns.length > 0
-  const pipelineSummary = useMemo(() => {
-    const collectionName = vectorStoreStatus?.collection_name || 'meetvault_transcripts'
-    const latestChunkCount =
-      latestEmbedded?.stored_chunks || latestEmbedded?.chunks || indexedCount || 0
-
-    if (latestActiveIngestion) {
-      return `Indexing ${latestActiveIngestion.meeting_title || latestActiveIngestion.original_filename || latestActiveIngestion.meeting_id} right now. ${indexedCount} chunk${indexedCount === 1 ? '' : 's'} already live in ${collectionName}.`
-    }
-
-    if (latestFailedIngestion) {
-      const detail = formatStatusDetail(latestFailedIngestion.error_detail)
-      return `Last failed asset: ${latestFailedIngestion.meeting_title || latestFailedIngestion.meeting_id}${detail ? ` - ${detail}` : ''}`
-    }
-
-    if (latestEmbedded) {
-      return `Last indexed ${latestEmbedded.meeting_title || latestEmbedded.original_filename || latestEmbedded.meeting_id} with ${latestChunkCount} chunk${latestChunkCount === 1 ? '' : 's'}. ${indexedCount} chunk${indexedCount === 1 ? '' : 's'} are live in ${collectionName}.`
-    }
-
-    if (latestSkippedIngestion) {
-      const ignored = workspaceSyncStatus?.ignored ?? 0
-      const alreadyIndexed = workspaceSyncStatus?.already_indexed ?? 0
-      if (ignored || alreadyIndexed) {
-        return `No new embeddings were needed in the latest sync. ${indexedCount} chunk${indexedCount === 1 ? '' : 's'} remain live in ${collectionName}; ${alreadyIndexed} already indexed item${alreadyIndexed === 1 ? '' : 's'} reused and ${ignored} non-transcribable item${ignored === 1 ? '' : 's'} ignored.`
+      const baseRow = {
+        user_id: userId,
+        meeting_id: meetingId,
+        meeting_title: title,
+        title,
+        status,
+        messages: messages ?? [],
+        query: MEETING_CHAT_LEGACY_QUERY,
       }
 
-      const detail =
-        formatStatusDetail(latestSkippedIngestion.error_detail) ||
-        latestSkippedIngestion.message ||
-        latestSkippedIngestion.source_type ||
-        ''
-      return `Last skipped asset: ${latestSkippedIngestion.meeting_title || latestSkippedIngestion.meeting_id}${detail ? ` - ${detail}` : ''}`
-    }
+      const { data: existing, error: findError } = await supabase
+        .from(CHAT_HISTORY_TABLE)
+        .select(CHAT_SELECT_FIELDS)
+        .eq('user_id', userId)
+        .eq('meeting_id', meetingId)
+        .maybeSingle()
 
-    return `Graph sync runs after sign-in using your admin-consented Microsoft token. ${indexedCount} chunk${indexedCount === 1 ? '' : 's'} are currently indexed in ${collectionName}.`
-  }, [indexedCount, latestActiveIngestion, latestEmbedded, latestFailedIngestion, latestSkippedIngestion, vectorStoreStatus, workspaceSyncStatus])
+      if (findError) {
+        console.error('Chat lookup failed:', findError)
+        setHistoryError(
+          findError.message ||
+            'Could not load meeting chat. Check Supabase connection and RLS policies.',
+        )
+        return null
+      }
 
-  useEffect(() => {
-    const fetchSession = async () => {
-      const { data, error } = await supabase.auth.getSession()
+      const writeChat = async () => {
+        if (existing?.id) {
+          return supabase
+            .from(CHAT_HISTORY_TABLE)
+            .update({
+              title,
+              meeting_title: title,
+              status,
+              messages: messages ?? existing.messages ?? [],
+            })
+            .eq('id', existing.id)
+            .eq('user_id', userId)
+            .select(CHAT_SELECT_FIELDS)
+            .maybeSingle()
+        }
+
+        return supabase
+          .from(CHAT_HISTORY_TABLE)
+          .insert(baseRow)
+          .select(CHAT_SELECT_FIELDS)
+          .maybeSingle()
+      }
+
+      let { data, error } = await writeChat()
+
+      if (error?.code === '23505') {
+        const retry = await supabase
+          .from(CHAT_HISTORY_TABLE)
+          .update({
+            title,
+            meeting_title: title,
+            status,
+            messages: messages ?? [],
+          })
+          .eq('user_id', userId)
+          .eq('meeting_id', meetingId)
+          .select(CHAT_SELECT_FIELDS)
+          .maybeSingle()
+        data = retry.data
+        error = retry.error
+      }
 
       if (error) {
-        console.error(error)
+        console.error('Chat upsert failed:', error)
+        const needsMigration =
+          error.code === '42703' ||
+          error.message?.includes('status') ||
+          error.message?.includes('messages')
+        setHistoryError(
+          needsMigration
+            ? 'Could not create meeting chat. Run supabase/migrations/001 and 002 in the Supabase SQL editor.'
+            : error.message || 'Could not create meeting chat.',
+        )
+        return null
       }
 
-      setSession(data.session)
-    }
+      if (!data) {
+        setHistoryError('Could not save meeting chat (no row returned).')
+        return null
+      }
 
-    fetchSession()
+      setHistoryError('')
+      const row = mapMeetingChatRow(data)
+      setMeetingChats((items) => [row, ...items.filter((item) => item.id !== row.id)])
+      return row
+    },
+    [userId],
+  )
 
-    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      if (!nextSession) {
-        setConversationTurns([])
-        setActiveConversationRecordId('')
-        setSearchMessage('')
-        setPipelineNotice('')
+  const persistChat = useCallback(
+    async (chatId, patch) => {
+      if (!userId) return null
+
+      const cleanPatch = sanitizeChatPatch(patch)
+      if (Object.keys(cleanPatch).length === 0) return null
+
+      const { data, error } = await supabase
+        .from(CHAT_HISTORY_TABLE)
+        .update(cleanPatch)
+        .eq('id', chatId)
+        .eq('user_id', userId)
+        .select(CHAT_SELECT_FIELDS)
+        .maybeSingle()
+
+      if (error) {
+        console.error('Chat persist failed:', error)
+        setHistoryError(
+          error.code === 'PGRST116'
+            ? 'Could not save chat changes (row not found or blocked by RLS).'
+            : error.message || 'Could not save chat changes.',
+        )
+      }
+
+      if (data) {
         setHistoryError('')
-        setVectorStoreStatus(null)
-        setWorkspaceSyncStatus(null)
-        setIngestionStatuses([])
-        setHistory([])
-        setActiveHistoryId('')
+        const updated = mapMeetingChatRow(data)
+        setMeetingChats((items) =>
+          [updated, ...items.filter((item) => item.id !== updated.id)],
+        )
+        return updated
       }
 
-      setSession(nextSession)
-    })
+      const localChat = meetingChatsRef.current.find((item) => item.id === chatId)
+      if (localChat?.meetingId) {
+        const recovered = await upsertMeetingChat({
+          meetingId: localChat.meetingId,
+          title: localChat.title,
+          status: cleanPatch.status ?? localChat.status,
+          messages: cleanPatch.messages ?? localChat.messages,
+        })
+        return recovered
+      }
 
-    return () => {
-      authListener.subscription.unsubscribe()
+      if (!error) {
+        setHistoryError('Could not save chat changes (row not found).')
+      }
+      return null
+    },
+    [upsertMeetingChat, userId],
+  )
+
+  const sleep = useCallback(
+    (ms) => new Promise((resolve) => window.setTimeout(resolve, ms)),
+    [],
+  )
+
+  const isNetworkFetchError = useCallback((error) => {
+    return error instanceof TypeError && String(error.message).includes('Failed to fetch')
+  }, [])
+
+  const checkBackendHealth = useCallback(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/`, { method: 'GET' })
+        if (response.ok) return true
+      } catch {
+        // retry — backend may be reloading or briefly busy
+      }
+      if (attempt < 4) {
+        await sleep(800)
+      }
+    }
+    return false
+  }, [sleep])
+
+  const loadCatalog = useCallback(async () => {
+    const token = graphTokenRef.current
+    if (!token) return
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/meetings/catalog`, {
+        headers: bearerHeaders(token),
+      })
+      if (!response.ok) return
+      const payload = await response.json()
+      setCatalogMeetings((payload.meetings || []).map(normalizeCatalogMeeting))
+      setCatalogSyncedAt(payload.synced_at || null)
+    } catch {
+      // Backend may be starting or Vite proxy reloading — sync will retry later.
     }
   }, [])
 
-  useEffect(() => {
-    if (!userId) return
+  const syncCatalog = useCallback(
+    async ({ silent = false } = {}) => {
+      if (catalogSyncInFlightRef.current) {
+        return null
+      }
 
-    const bootstrap = async () => {
-      await Promise.all([
-        loadVectorStoreStatus(),
-        loadWorkspaceSyncStatus(),
-        loadIngestionStatuses(),
-        loadHistory(),
-      ])
+      if (!graphToken) {
+        if (!silent) {
+          setCatalogError(
+            'Microsoft Graph token is not available. Sign out and sign in again to sync meetings.',
+          )
+        }
+        return null
+      }
+
+      const backendUp = await checkBackendHealth()
+      if (!backendUp) {
+        const message =
+          'Backend API is not reachable yet. Start uvicorn on port 8000, wait a few seconds, then refresh.'
+        const now = Date.now()
+        if (!silent || now - lastBackendWarnAtRef.current > 60_000) {
+          lastBackendWarnAtRef.current = now
+          if (silent) {
+            console.warn('Background catalog sync skipped:', message)
+          } else {
+            setCatalogError(message)
+          }
+        }
+        return null
+      }
+
+      catalogSyncInFlightRef.current = true
+      if (!silent) setCatalogSyncing(true)
+      if (!silent) setCatalogError('')
+
+      try {
+        let payload = null
+        let lastNetworkError = null
+        let mergeHttpStatus = null
+
+        const authHeaders = bearerHeaders(graphToken)
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            const teamsResponse = await fetch(
+              `${API_BASE_URL}/meetings/catalog/discover/teams?limit=30`,
+              { method: 'POST', headers: authHeaders },
+            )
+
+            if (!teamsResponse.ok) {
+              throw new Error(
+                await readErrorMessage(teamsResponse, 'Teams catalog discovery failed.'),
+              )
+            }
+
+            const teamsSource = await teamsResponse.json()
+            const meetingTitles = (teamsSource.calendar_meetings || [])
+              .map((meeting) => meeting.title)
+              .filter(Boolean)
+
+            const onedriveResponse = await fetch(
+              `${API_BASE_URL}/meetings/catalog/discover/onedrive`,
+              {
+                method: 'POST',
+                headers: { ...authHeaders, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ meeting_titles: meetingTitles }),
+              },
+            )
+
+            if (!onedriveResponse.ok) {
+              throw new Error(
+                await readErrorMessage(onedriveResponse, 'OneDrive catalog discovery failed.'),
+              )
+            }
+
+            const onedriveSource = await onedriveResponse.json()
+
+            const mergeResponse = await fetch(`${API_BASE_URL}/meetings/catalog/merge`, {
+              method: 'POST',
+              headers: {
+                ...authHeaders,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ teams: teamsSource, onedrive: onedriveSource }),
+            })
+
+            mergeHttpStatus = mergeResponse.status
+
+            if (!mergeResponse.ok) {
+              throw new Error(
+                await readErrorMessage(mergeResponse, 'Meeting catalog merge failed.'),
+              )
+            }
+
+            payload = await mergeResponse.json()
+            break
+          } catch (error) {
+            if (!isNetworkFetchError(error) || attempt >= 2) {
+              throw error
+            }
+            lastNetworkError = error
+            const backendUp = await checkBackendHealth()
+            if (!backendUp) {
+              throw error
+            }
+            await sleep(1500 * (attempt + 1))
+          }
+        }
+
+        if (!payload) {
+          throw lastNetworkError || new Error('Meeting catalog sync failed.')
+        }
+
+        const normalized = (payload.meetings || []).map(normalizeCatalogMeeting)
+        setCatalogMeetings(normalized)
+        setCatalogSyncedAt(payload.synced_at || null)
+
+        if (payload.sync_status === 'FAILED' && payload.sync_error && !silent) {
+          setCatalogError(payload.sync_error)
+          return payload
+        }
+
+        if (payload.sync_error && !silent) {
+          setCatalogError(payload.sync_error)
+          return payload
+        }
+
+        if (!silent && normalized.length === 0) {
+          const diagnostics = payload.diagnostics || {}
+          const scanned = diagnostics.calendar_meetings_scanned ?? 0
+          const withContent =
+            diagnostics.meetings_with_recording_or_transcript
+            ?? diagnostics.meetings_with_graph_recording_or_transcript
+            ?? 0
+          const onedriveMatched = diagnostics.onedrive_matched_calendar_meetings ?? 0
+          const indexed = diagnostics.meetings_indexed_in_chroma ?? 0
+          const resolved = diagnostics.resolved_online_meeting_id ?? 0
+          const unresolved = diagnostics.unresolved_online_meeting_id ?? 0
+          const withTranscripts = diagnostics.with_graph_transcripts ?? 0
+          const permissionErrors = diagnostics.graph_permission_errors ?? 0
+
+          console.warn('Meetings catalog sync returned no meetings.', {
+            diagnostics,
+            httpStatus: mergeHttpStatus,
+            calendarRange: {
+              oldest: diagnostics.calendar_oldest_scanned,
+              newest: diagnostics.calendar_newest_scanned,
+            },
+            hint:
+              'If your meeting is outside this date range or not in the scanned set, it will not appear. Check Teams recap exists for an organizer calendar meeting.',
+          })
+
+          let message =
+            scanned === 0
+              ? 'No past Teams meetings were found on your calendar (last 30 days). Record a Teams meeting, then sync again.'
+              : withContent === 0 && indexed === 0
+                ? `Found ${scanned} Teams meeting(s), but none with a detectable recording or transcript in Teams or OneDrive.`
+                : 'No meetings matched the catalog filter. Try Sync again.'
+
+          if (scanned > 0 && withContent === 0 && indexed === 0) {
+            if (diagnostics.calendar_oldest_scanned && diagnostics.calendar_newest_scanned) {
+              message += ` Scanned calendar range: ${formatDateTime(diagnostics.calendar_oldest_scanned)} – ${formatDateTime(diagnostics.calendar_newest_scanned)}.`
+            }
+            if (unresolved > 0 && resolved === 0) {
+              message += ` Could not link ${unresolved} meeting(s) to a Teams online meeting ID (join URL lookup failed).`
+            } else if (resolved > 0 && withTranscripts === 0) {
+              message +=
+                ' Teams online meetings were found, but Graph returned no recordings or transcripts. Enable transcription on the meeting and wait until the transcript appears in Teams.'
+            }
+            if (onedriveMatched > 0 && withContent === 0) {
+              message += ` Found ${onedriveMatched} OneDrive asset(s) but they did not match calendar titles closely enough.`
+            }
+            if (permissionErrors > 0) {
+              message += ` Graph returned permission errors for ${permissionErrors} meeting(s) — confirm OnlineMeetingTranscript.Read.All is consented in Azure.`
+            }
+            const throttled = diagnostics.graph_throttled ?? 0
+            if (throttled > 0) {
+              message += ` Microsoft Graph throttled ${throttled} lookup(s). Wait a minute and sync again.`
+            }
+          }
+
+          setCatalogError(message)
+        }
+
+        return payload
+      } catch (error) {
+        const isNetworkError = isNetworkFetchError(error)
+        const message = isNetworkError
+          ? `Cannot reach the API at ${API_BASE_URL}. Start the backend (uvicorn on port 8000) and refresh.`
+          : error.message || 'Meeting catalog sync failed.'
+
+        if (silent) {
+          console.warn('Background catalog sync failed:', message)
+        } else {
+          console.error(error)
+          setCatalogError(message)
+        }
+        return null
+      } finally {
+        catalogSyncInFlightRef.current = false
+        if (!silent) setCatalogSyncing(false)
+        if (!silent) setCatalogLoading(false)
+      }
+    },
+    [checkBackendHealth, graphToken, isNetworkFetchError, sleep],
+  )
+
+  syncCatalogRef.current = syncCatalog
+
+  const fetchIngestionStatus = useCallback(async (meetingId) => {
+    const token = graphTokenRef.current
+    if (!token) return null
+
+    try {
+      const response = await fetch(
+        `${API_BASE_URL}/ingestion/status/${encodeURIComponent(meetingId)}`,
+        { headers: bearerHeaders(token) },
+      )
+      if (!response.ok) return null
+      const payload = await response.json()
+      setIngestionByMeeting((current) => {
+        if (ingestionStatusUnchanged(current[meetingId], payload)) {
+          return current
+        }
+        return { ...current, [meetingId]: payload }
+      })
+      return payload
+    } catch {
+      return null
     }
+  }, [])
 
-    bootstrap()
-  }, [loadHistory, loadIngestionStatuses, loadVectorStoreStatus, loadWorkspaceSyncStatus, userId])
+  const startMeetingIngestion = useCallback(
+    async (meetingId) => {
+      if (!graphToken) return null
 
-  useEffect(() => {
-    if (!userId || !graphToken) return
+      const response = await fetch(
+        `${API_BASE_URL}/ingestion/meetings/${encodeURIComponent(meetingId)}/start`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${graphToken}` },
+        },
+      )
 
-    const syncKey = `meetvault-graph-sync-${userId}`
-    if (sessionStorage.getItem(syncKey)) return
+      if (!response.ok) {
+        throw new Error(await readErrorMessage(response, 'Could not start meeting preparation.'))
+      }
 
-    sessionStorage.setItem(syncKey, 'started')
-    const syncTimer = window.setTimeout(() => {
-      startGraphWorkspaceSync()
-    }, 0)
+      const payload = await response.json()
+      await fetchIngestionStatus(meetingId)
+      return payload
+    },
+    [fetchIngestionStatus, graphToken],
+  )
 
-    return () => window.clearTimeout(syncTimer)
-  }, [graphToken, startGraphWorkspaceSync, userId])
+  const generateSummary = useCallback(
+    async (chat) => {
+      if (!chat?.meetingId || summaryRequestedRef.current.has(chat.id)) return
+      if (summarySkippedRef.current.has(chat.id)) return
 
-  useEffect(() => {
-    if (!userId) return undefined
+      const hasAssistant = (chat.messages || []).some((message) => message.role === 'assistant')
+      if (hasAssistant) return
 
-    const intervalId = window.setInterval(() => {
-      loadVectorStoreStatus()
-      loadWorkspaceSyncStatus()
-      loadIngestionStatuses()
-    }, STATUS_POLL_MS)
+      const token = graphTokenRef.current
+      if (!token) return
 
-    return () => window.clearInterval(intervalId)
-  }, [loadIngestionStatuses, loadVectorStoreStatus, loadWorkspaceSyncStatus, userId])
-
-  const handleAuth = async () => {
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'azure',
-      options: {
-        scopes: REQUIRED_LOGIN_SCOPES,
-      },
-    })
-
-    if (error) {
-      console.error(error)
-    }
-  }
-
-  const handleSignOut = async () => {
-    await supabase.auth.signOut()
-    setShowProfile(false)
-  }
-
-  const executeSearch = useCallback(
-    async (rawQuery, { persistHistory = true, historyId = '', meetingId = null } = {}) => {
-      const trimmedQuery = rawQuery.trim()
-      if (!trimmedQuery) return
-
-      setIsSearching(true)
-      setSearchMessage('')
-      setPipelineNotice('')
-      setHistoryError('')
+      summaryRequestedRef.current.add(chat.id)
 
       try {
         const response = await fetch(`${API_BASE_URL}/rag/query`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
+          headers: bearerHeaders(token, { 'Content-Type': 'application/json' }),
+          body: JSON.stringify({
+            query: SUMMARY_PROMPT,
+            meeting_id: chat.meetingId,
+          }),
+        })
+
+        if (!response.ok) {
+          throw new Error(await readErrorMessage(response, 'Summary generation failed.'))
+        }
+
+        const payload = await response.json()
+        const text =
+          typeof payload.answer === 'string' && payload.answer.trim()
+            ? payload.answer.trim()
+            : 'Summary is not available yet.'
+
+        const summaryMessage = {
+          id: `summary-${crypto.randomUUID()}`,
+          role: 'assistant',
+          text,
+          mode: payload.answer_mode || 'extractive_summary',
+          sourceCount: (payload.sources || []).length,
+          createdAt: new Date().toISOString(),
+        }
+
+        const nextMessages = [...(chat.messages || []), summaryMessage]
+        await persistChat(chat.id, {
+          messages: nextMessages,
+          status: 'ready',
+        })
+      } catch (error) {
+        console.error(error)
+        summaryRequestedRef.current.delete(chat.id)
+        if (activeChatIdRef.current === chat.id) {
+          setPipelineNotice('Could not generate a meeting summary. You can still ask questions below.')
+        }
+      }
+    },
+    [persistChat],
+  )
+
+  const markChatReady = useCallback(
+    async (chat) => {
+      if (!chat || chat.status === 'ready') {
+        if (chat) await generateSummary(chat)
+        return
+      }
+
+      const updated = await persistChat(chat.id, { status: 'ready' })
+
+      if (updated) {
+        await generateSummary(updated)
+        return
+      }
+
+      if (chat.meetingId) {
+        const recovered = await upsertMeetingChat({
+          meetingId: chat.meetingId,
+          title: chat.title,
+          status: 'ready',
+          messages: chat.messages ?? [],
+        })
+        if (recovered) {
+          await generateSummary(recovered)
+        }
+      }
+    },
+    [generateSummary, persistChat, upsertMeetingChat],
+  )
+
+  const handleMeetingReady = useCallback(
+    async (chat, ingestionPayload) => {
+      if (!chat) return
+
+      if (ingestionPayload?.status === 'EMBEDDED') {
+        await markChatReady(chat)
+        setCatalogMeetings((items) => patchCatalogMeetingIndexed(items, chat.meetingId, true))
+        return
+      }
+
+      if (['FAILED', 'NO_TRANSCRIPT'].includes(ingestionPayload?.status)) {
+        await persistChat(chat.id, { status: 'failed' })
+      }
+    },
+    [markChatReady, persistChat],
+  )
+
+  const openMeeting = useCallback(
+    async (meeting) => {
+      const meetingId = meeting.id
+      const title = meeting.title
+
+      setActiveNav('workspace')
+      setQuery('')
+      setSearchMessage('')
+      setPipelineNotice('')
+
+      const ingestion = await fetchIngestionStatus(meetingId)
+      const isEmbedded = ingestion?.status === 'EMBEDDED'
+
+      let chat = meetingChatsRef.current.find((item) => item.meetingId === meetingId)
+      if (!chat) {
+        chat = await upsertMeetingChat({
+          meetingId,
+          title,
+          status: isEmbedded ? 'ready' : 'preparing',
+          messages: [],
+        })
+      } else if (!isEmbedded && chat.status === 'ready') {
+        const reset = await persistChat(chat.id, { status: 'preparing', messages: [] })
+        chat = reset || { ...chat, status: 'preparing', messages: [] }
+      }
+
+      if (!chat) return
+
+      setActiveChatId(chat.id)
+
+      if (isEmbedded) {
+        setCatalogMeetings((items) => patchCatalogMeetingIndexed(items, meetingId, true))
+        await markChatReady(chat)
+        return
+      }
+
+      setCatalogMeetings((items) => patchCatalogMeetingIndexed(items, meetingId, false))
+
+      if (['FAILED', 'NO_TRANSCRIPT'].includes(ingestion?.status)) {
+        await persistChat(chat.id, { status: 'failed' })
+        return
+      }
+
+      if (chat.status !== 'preparing') {
+        await persistChat(chat.id, { status: 'preparing' })
+      }
+
+      if (shouldStartIngestion(ingestion)) {
+        ingestionStartAttemptedRef.current.add(meetingId)
+        try {
+          await startMeetingIngestion(meetingId)
+        } catch (error) {
+          console.error(error)
+          setCatalogError(error.message)
+          await persistChat(chat.id, { status: 'failed' })
+          ingestionStartAttemptedRef.current.delete(meetingId)
+        }
+      }
+    },
+    [
+      fetchIngestionStatus,
+      markChatReady,
+      persistChat,
+      startMeetingIngestion,
+      upsertMeetingChat,
+    ],
+  )
+
+  const deleteMeetingChat = useCallback(
+    async (chatId) => {
+      const chat = meetingChatsRef.current.find((item) => item.id === chatId)
+      if (!chat?.id || !chat.meetingId) return
+
+      const confirmed = window.confirm(
+        'Delete this meeting chat and remove all indexed transcript data for this meeting? You can open the meeting again later to re-prepare it.',
+      )
+      if (!confirmed) return
+
+      const token = graphTokenRef.current
+      if (!token) {
+        setSearchMessage(
+          'Microsoft Graph token is not available. Sign out and sign in again.',
+        )
+        return
+      }
+
+      setIsDeletingChat(true)
+      setSearchMessage('')
+      setPipelineNotice('')
+
+      try {
+        const response = await fetch(
+          `${API_BASE_URL}/ingestion/meetings/${encodeURIComponent(chat.meetingId)}`,
+          {
+            method: 'DELETE',
+            headers: bearerHeaders(token),
           },
+        )
+
+        if (!response.ok) {
+          throw new Error(
+            await readErrorMessage(response, 'Could not delete meeting data.'),
+          )
+        }
+
+        const { error } = await supabase
+          .from(CHAT_HISTORY_TABLE)
+          .delete()
+          .eq('id', chatId)
+          .eq('user_id', userId)
+
+        if (error) {
+          throw new Error(error.message || 'Could not delete chat.')
+        }
+
+        const meetingId = chat.meetingId
+        summaryRequestedRef.current.delete(chatId)
+        summarySkippedRef.current.delete(chatId)
+        ingestionStartAttemptedRef.current.delete(meetingId)
+
+        const remaining = meetingChatsRef.current.filter((item) => item.id !== chatId)
+        setMeetingChats(remaining)
+        setActiveChatId((current) => (current === chatId ? remaining[0]?.id || '' : current))
+        setIngestionByMeeting((current) => {
+          const next = { ...current }
+          delete next[meetingId]
+          return next
+        })
+        setCatalogMeetings((items) => patchCatalogMeetingIndexed(items, meetingId, false))
+
+        try {
+          const catalogResponse = await fetch(`${API_BASE_URL}/meetings/catalog`, {
+            headers: bearerHeaders(token),
+          })
+          if (catalogResponse.ok) {
+            const payload = await catalogResponse.json()
+            setCatalogMeetings((payload.meetings || []).map(normalizeCatalogMeeting))
+            setCatalogSyncedAt(payload.synced_at || null)
+          }
+        } catch {
+          // Local patch is enough if catalog refresh fails.
+        }
+
+        setQuery('')
+        setHistoryError('')
+      } catch (error) {
+        console.error(error)
+        setSearchMessage(error.message || 'Could not delete chat.')
+      } finally {
+        setIsDeletingChat(false)
+      }
+    },
+    [userId],
+  )
+
+  const clearMeetingChat = useCallback(
+    async (chatId) => {
+      const chat = meetingChatsRef.current.find((item) => item.id === chatId)
+      if (!chat?.id) return
+
+      const hasMessages = (chat.messages || []).length > 0
+      if (!hasMessages) return
+
+      const confirmed = window.confirm(
+        'Clear all messages in this meeting chat? This cannot be undone.',
+      )
+      if (!confirmed) return
+
+      summaryRequestedRef.current.delete(chatId)
+      summarySkippedRef.current.add(chatId)
+      setQuery('')
+      setSearchMessage('')
+      setPipelineNotice('')
+
+      const saved = await persistChat(chatId, { messages: [] })
+      if (!saved) {
+        summarySkippedRef.current.delete(chatId)
+        setSearchMessage('Could not clear chat. Try again.')
+        return
+      }
+
+      setMeetingChats((items) =>
+        items.map((item) => (item.id === chatId ? { ...item, messages: [] } : item)),
+      )
+    },
+    [persistChat],
+  )
+
+  const handleMeetingSearch = useCallback(
+    async (event) => {
+      event.preventDefault()
+      if (!activeChat?.meetingId) return
+
+      const trimmedQuery = query.trim()
+      if (!trimmedQuery) return
+
+      if (!isChatReady(activeChat.status, activeIngestion?.status)) return
+
+      const chatId = activeChat.id
+      const meetingId = activeChat.meetingId
+      const priorMessages = activeChat.messages || []
+      const token = graphTokenRef.current
+
+      if (!token) {
+        setSearchMessage('Microsoft Graph token is not available. Sign out and sign in again.')
+        return
+      }
+
+      setIsSearching(true)
+      setSearchMessage('')
+      setPipelineNotice('')
+
+      const userMessage = {
+        id: `user-${crypto.randomUUID()}`,
+        role: 'user',
+        text: trimmedQuery,
+        createdAt: new Date().toISOString(),
+      }
+
+      const optimisticMessages = [...priorMessages, userMessage]
+      setMeetingChats((items) =>
+        items.map((item) =>
+          item.id === chatId ? { ...item, messages: optimisticMessages } : item,
+        ),
+      )
+      setQuery('')
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/rag/query`, {
+          method: 'POST',
+          headers: bearerHeaders(token, { 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             query: trimmedQuery,
             meeting_id: meetingId,
@@ -455,164 +1037,178 @@ function App() {
         }
 
         const payload = await response.json()
-        const results = (payload.sources || []).map((source, index) => ({
-          chunk_id: source.chunk_id || `source-${index + 1}`,
-          text: source.text || '',
-          metadata: source.metadata || {},
-          distance: typeof source.distance === 'number' ? source.distance : null,
-        }))
-        const answer =
+        const answerText =
           typeof payload.answer === 'string' && payload.answer.trim()
-            ? {
-                mode: payload.answer_mode || 'rag_answer',
-                text: payload.answer,
-              }
-            : null
+            ? payload.answer.trim()
+            : 'No grounded answer is available for this meeting yet.'
 
-        setQuery(trimmedQuery)
-        setConversationTurns((previous) => [
-          ...previous,
-          {
-            id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-            query: trimmedQuery,
-            answer,
-            sourceCount: results.length,
-            meetingTitle: results[0]?.metadata?.meeting_title || '',
-          },
-        ])
-        setQuery('')
-        setSearchMessage(
-          results.length
-            ? `Generated an answer from ${results.length} grounded chunk${results.length === 1 ? '' : 's'} in ChromaDB.`
-            : 'No matching transcript chunk is indexed yet. Run Graph workspace sync and wait for recordings to finish indexing.',
+        const assistantMessage = {
+          id: `assistant-${crypto.randomUUID()}`,
+          role: 'assistant',
+          text: answerText,
+          mode: payload.answer_mode || 'rag_answer',
+          createdAt: new Date().toISOString(),
+        }
+
+        const nextMessages = [...optimisticMessages, assistantMessage]
+        await persistChat(chatId, {
+          messages: nextMessages,
+          status: 'ready',
+        })
+
+        if (activeChatIdRef.current === chatId) {
+          if (payload.llm_error) {
+            setPipelineNotice(
+              'The answer model is unavailable right now, so MeetVault showed a retrieval-based fallback.',
+            )
+          }
+        }
+      } catch (error) {
+        console.error(error)
+        if (activeChatIdRef.current === chatId) {
+          setSearchMessage(error.message || 'Search failed.')
+        }
+        setMeetingChats((items) =>
+          items.map((item) =>
+            item.id === chatId ? { ...item, messages: priorMessages } : item,
+          ),
         )
-        if (payload.llm_error) {
-          setPipelineNotice(
-            'The answer model is unavailable right now, so MeetVault is showing a grounded retrieval-based fallback answer.',
-          )
-        }
+      } finally {
+        setIsSearching(false)
+      }
+    },
+    [activeChat, activeIngestion?.status, persistChat, query],
+  )
 
-        if (!persistHistory || !userId) {
-          setActiveHistoryId(historyId || '')
-          return
-        }
+  useEffect(() => {
+    const fetchSession = async () => {
+      const { data, error } = await supabase.auth.getSession()
+      if (error) console.error(error)
+      setSession(data.session)
+    }
 
-        const preview =
-          payload.answer_mode === 'gemini'
-            ? 'RAG answer'
-            : payload.answer_mode === 'extractive_summary'
-              ? 'Fallback summary'
-              : 'Workspace retrieval'
-        const meeting_id = results[0]?.metadata?.meeting_id || null
-        const meeting_title = results[0]?.metadata?.meeting_title || null
+    fetchSession()
 
-        if (activeConversationRecordId) {
-          const { data, error } = await supabase
-            .from(CHAT_HISTORY_TABLE)
-            .update({
-              preview,
-              query: trimmedQuery,
-              meeting_id,
-              meeting_title,
-            })
-            .eq('id', activeConversationRecordId)
-            .select('id,title,preview,query,meeting_id,meeting_title,created_at')
-            .single()
+    const { data: authListener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!nextSession) {
+        setMeetingChats([])
+        setActiveChatId('')
+        setCatalogMeetings([])
+        setCatalogSyncedAt(null)
+        setIngestionByMeeting({})
+        summaryRequestedRef.current = new Set()
+        ingestionStartAttemptedRef.current = new Set()
+        catalogBootstrapDoneRef.current = false
+      }
+      setSession(nextSession)
+    })
 
-          if (error) {
-            console.error('History update failed:', error)
-            setHistoryError('Search history could not be updated in Supabase.')
+    return () => authListener.subscription.unsubscribe()
+  }, [])
+
+  useEffect(() => {
+    if (!userId) return
+    loadMeetingChats()
+    loadCatalog()
+  }, [loadCatalog, loadMeetingChats, userId])
+
+  useEffect(() => {
+    if (!graphToken || !userId) return undefined
+
+    if (catalogBootstrapDoneRef.current) {
+      return undefined
+    }
+    catalogBootstrapDoneRef.current = true
+
+    const bootstrap = async () => {
+      // Let Vite proxy and uvicorn settle after dev-server or HMR restarts.
+      await new Promise((resolve) => window.setTimeout(resolve, 3000))
+      const backendUp = await checkBackendHealth()
+      if (!backendUp) {
+        return
+      }
+      setCatalogLoading(true)
+      try {
+        await syncCatalogRef.current?.({ silent: true })
+      } finally {
+        setCatalogLoading(false)
+      }
+    }
+
+    bootstrap()
+
+    const intervalId = window.setInterval(() => {
+      void syncCatalogRef.current?.({ silent: true })
+    }, CATALOG_SYNC_MS)
+
+    return () => window.clearInterval(intervalId)
+  }, [checkBackendHealth, graphToken, userId])
+
+  pollIngestionRef.current = async () => {
+    const targets = meetingChatsRef.current.filter((chat) =>
+      isChatPreparing(
+        chat.status,
+        ingestionByMeetingRef.current[chat.meetingId]?.status,
+      ),
+    )
+
+    if (targets.length === 0) return
+
+    await Promise.all(
+      targets.map(async (chat) => {
+        let payload = await fetchIngestionStatus(chat.meetingId)
+
+        if (
+          payload?.status === 'NOT_STARTED' &&
+          graphTokenRef.current &&
+          !ingestionStartAttemptedRef.current.has(chat.meetingId)
+        ) {
+          ingestionStartAttemptedRef.current.add(chat.meetingId)
+          try {
+            await startMeetingIngestion(chat.meetingId)
+            payload = await fetchIngestionStatus(chat.meetingId)
+          } catch (error) {
+            console.error(error)
+            setCatalogError(error.message)
+            await persistChat(chat.id, { status: 'failed' })
+            ingestionStartAttemptedRef.current.delete(chat.meetingId)
             return
           }
-
-          const updatedHistoryItem = mapHistoryRow(data)
-          setHistory((items) =>
-            [updatedHistoryItem, ...items.filter((item) => item.id !== updatedHistoryItem.id)],
-          )
-          setActiveHistoryId(updatedHistoryItem.id)
-          return
         }
 
-        const { data, error } = await supabase
-          .from(CHAT_HISTORY_TABLE)
-          .insert({
-            user_id: userId,
-            title: trimmedQuery,
-            preview,
-            query: trimmedQuery,
-            meeting_id,
-            meeting_title,
-          })
-          .select('id,title,preview,query,meeting_id,meeting_title,created_at')
-          .single()
-
-      if (historyInsertError) {
-        console.error('History insert failed:', historyInsertError)
-        setHistoryError('This chat is only saved locally until history storage is ready.')
-      } else {
-        const persistedHistory = mapHistoryRow(savedHistory)
-
-        setHistory((items) =>
-          items.map((item) => (item.id === historyItem.id ? persistedHistory : item)),
-        )
-
-        setActiveHistoryId(persistedHistory.id)
-      }
-
-      const response = await fetch(
-        `${API_BASE_URL}/search?query=${encodeURIComponent(trimmedQuery)}`,
-        {
-          headers: authToken
-            ? {
-                Authorization: `Bearer ${authToken}`,
-                'X-Meeting-Context': selectedMeeting?.id || '',
-              }
-            : undefined,
-        },
-      )
-
-      if (!response.ok) {
-        throw new Error('Search request failed')
-      }
-    } catch (error) {
-      console.error(error)
-    } finally {
-      setIsSearching(false)
-      setQuery('')
-    }
+        if (payload) {
+          await handleMeetingReady(chat, payload)
+        }
+      }),
+    )
   }
 
-  const refreshLatestMeetings = async () => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/meetings/recent`, {
-        headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
-      })
+  useEffect(() => {
+    if (!userId) return undefined
 
-      if (!response.ok) {
-        throw new Error('Meeting request failed')
-      }
-
-      const data = await response.json()
-      const normalizedMeetings = data.map((meeting) => ({
-        id: meeting.meeting_id,
-        title: meeting.title,
-        team: meeting.organizer || 'Microsoft Teams',
-        time: meeting.start_time || 'Latest',
-        summary:
-          'Retrieved from Microsoft Graph. RAG topics will attach after transcript ingestion.',
-        tags: ['Graph', 'Latest'],
-      }))
-
-      if (normalizedMeetings.length > 0) {
-        setMeetings(normalizedMeetings)
-        setSelectedMeetingId(normalizedMeetings[0].id)
-      }
-    } catch (error) {
-      console.error(error)
-      setMeetings(initialMeetings)
-      setSelectedMeetingId(initialMeetings[0].id)
+    const tick = () => {
+      void pollIngestionRef.current()
     }
+
+    tick()
+    const intervalId = window.setInterval(tick, INGESTION_POLL_MS)
+    return () => window.clearInterval(intervalId)
+  }, [userId])
+
+  const handleAuth = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'azure',
+      options: { scopes: REQUIRED_LOGIN_SCOPES },
+    })
+    if (error) console.error(error)
   }
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut()
+    setShowProfile(false)
+  }
+
+  const mainTitle = activeChat?.title || (activeNav === 'meetings' ? 'Meetings' : 'Workspace')
 
   if (session === undefined) {
     return (
@@ -639,20 +1235,17 @@ function App() {
             <div className="brand-mark">M</div>
             <div>
               <p className="eyebrow">MeetVault AI</p>
-              <h1>Automatic meeting indexing</h1>
+              <h1>Meeting intelligence from Teams recordings</h1>
             </div>
           </div>
-
           <div className="login-copy">
             <p className="eyebrow">Required authentication</p>
-            <h2 id="login-title">Sign in with Microsoft to search your synced recordings</h2>
+            <h2 id="login-title">Sign in with Microsoft to browse recorded meetings</h2>
             <p>
-              MeetVault starts Microsoft Graph workspace sync after sign-in, fetches accessible
-              SharePoint and OneDrive recordings, transcribes them, and stores embeddings in
-              ChromaDB.
+              MeetVault discovers Teams calendar meetings with recordings, prepares transcripts when you
+              open a chat, and answers questions grounded in your meeting content.
             </p>
           </div>
-
           <button className="auth-button full-width" type="button" onClick={handleAuth}>
             Continue with Microsoft
           </button>
@@ -663,37 +1256,61 @@ function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-label="Search history">
+      <aside className="sidebar" aria-label="Navigation and meeting chats">
         <div className="brand-lockup compact">
           <div className="brand-mark">M</div>
           <div>
             <p className="eyebrow">MeetVault AI</p>
-            <h1>Workspace search</h1>
+            <h1>Workspace</h1>
           </div>
         </div>
 
-        <button className="subtle-button full-width" type="button" onClick={handleReset}>
-          New chat
-        </button>
+        <nav className="sidebar-nav" aria-label="Primary navigation">
+          <button
+            type="button"
+            className={activeNav === 'workspace' ? 'nav-tab active' : 'nav-tab'}
+            onClick={() => setActiveNav('workspace')}
+          >
+            Workspace
+          </button>
+          <button
+            type="button"
+            className={activeNav === 'meetings' ? 'nav-tab active' : 'nav-tab'}
+            onClick={() => setActiveNav('meetings')}
+          >
+            Show Meetings
+          </button>
+        </nav>
 
         <div className="sidebar-section">
-          <p className="eyebrow">History</p>
+          <p className="eyebrow">Meeting chats</p>
           <div className="history-list">
-            {isHistoryLoading ? <p className="sidebar-note">Loading history...</p> : null}
-            {!isHistoryLoading && history.length === 0 ? (
-              <p className="sidebar-note">Saved searches will appear here.</p>
+            {isHistoryLoading ? <p className="sidebar-note">Loading chats…</p> : null}
+            {!isHistoryLoading && meetingChats.length === 0 ? (
+              <p className="sidebar-note">Open a meeting from Show Meetings to start a chat.</p>
             ) : null}
-            {history.map((item) => (
-              <button
-                className={`history-item ${item.id === activeHistoryId ? 'active' : ''}`}
-                key={item.id}
-                type="button"
-                onClick={() => handleHistorySelect(item)}
-              >
-                <span>{item.title}</span>
-                <small>{item.preview || formatDateTime(item.createdAt)}</small>
-              </button>
-            ))}
+            {historyError ? <p className="sidebar-note error">{historyError}</p> : null}
+            {meetingChats.map((item) => {
+              const ingestion = ingestionByMeeting[item.meetingId]
+              const preparing = isChatPreparing(item.status, ingestion?.status)
+              return (
+                <button
+                  className={`history-item ${item.id === activeChatId ? 'active' : ''}`}
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    setActiveChatId(item.id)
+                    setActiveNav('workspace')
+                  }}
+                >
+                  <span className="history-item-row">
+                    <span className="history-item-title">{item.title}</span>
+                    {preparing ? <span className="inline-spinner" aria-label="Preparing" /> : null}
+                  </span>
+                  <small>{item.status === 'ready' ? 'Ready' : preparing ? 'Preparing…' : item.status}</small>
+                </button>
+              )
+            })}
           </div>
         </div>
 
@@ -709,10 +1326,9 @@ function App() {
       <div className="main-shell">
         <header className="topbar">
           <div className="topbar-text">
-            <p className="eyebrow">Search stored meeting knowledge</p>
-            <h2>{hasConversation ? 'Ask follow-up questions about your recordings' : 'Ask about your indexed recordings'}</h2>
+            <p className="eyebrow">Internal meeting intelligence</p>
+            <h2>{mainTitle}</h2>
           </div>
-
           <button
             className="profile-button"
             type="button"
@@ -720,7 +1336,7 @@ function App() {
             aria-label="User profile"
             title="User profile"
           >
-            <span className="presence-dot" aria-hidden="true"></span>
+            <span className="presence-dot" aria-hidden="true" />
             <span>{userProfile.name.slice(0, 2).toUpperCase()}</span>
           </button>
 
@@ -733,7 +1349,6 @@ function App() {
                   <p>{userProfile.email}</p>
                 </div>
               </div>
-
               <dl className="credential-list">
                 <div>
                   <dt>Provider</dt>
@@ -747,20 +1362,7 @@ function App() {
                   <dt>Token type</dt>
                   <dd>{userProfile.tokenType}</dd>
                 </div>
-                <div className="token-row">
-                  <dt>Access token</dt>
-                  <dd>
-                    <textarea
-                      className="token-field"
-                      value={userProfile.token}
-                      readOnly
-                      rows={6}
-                      aria-label="Complete access token"
-                    />
-                  </dd>
-                </div>
               </dl>
-
               <button className="signout-button" type="button" onClick={handleSignOut}>
                 Sign out
               </button>
@@ -768,121 +1370,47 @@ function App() {
           ) : null}
         </header>
 
-        <main className={`main-panel ${hasConversation ? 'chat-mode' : ''}`}>
-          <section className={`search-stage ${hasConversation ? 'has-results' : ''}`}>
-            {!hasConversation ? (
-              <section className="graph-sync-card" aria-label="Microsoft Graph workspace sync">
-                <div>
-                  <p className="eyebrow">Workspace sync</p>
-                  <h3>Microsoft Graph and SharePoint automation</h3>
-                  <p className="graph-sync-copy">
-                    MeetVault checks accessible SharePoint and OneDrive recording files only.
-                    Large videos may take several minutes while transcription and embedding run in
-                    the backend.
-                  </p>
-                </div>
+        <main className={`main-panel ${activeChat ? 'chat-mode' : ''}`}>
+          {activeNav === 'meetings' ? (
+            <MeetingsGridView
+              meetings={catalogMeetings}
+              syncedAt={catalogSyncedAt}
+              loading={catalogLoading}
+              syncing={catalogSyncing}
+              error={catalogError}
+              onSync={() => syncCatalog()}
+              onSelectMeeting={openMeeting}
+            />
+          ) : null}
 
-                <div className="graph-sync-actions">
-                  <button className="subtle-button" type="button" onClick={handleStartGraphSync}>
-                    Sync workspace now
-                  </button>
-                </div>
+          {activeNav === 'workspace' && activeChat ? (
+            <MeetingChatView
+              title={activeChat.title}
+              chatStatus={activeChat.status}
+              ingestionStatus={activeIngestion}
+              messages={activeChat.messages}
+              query={query}
+              isSearching={isSearching}
+              searchMessage={searchMessage}
+              pipelineNotice={pipelineNotice}
+              canClearChat={
+                isChatReady(activeChat.status, activeIngestion?.status) &&
+                (activeChat.messages || []).length > 0 &&
+                !isSearching &&
+                !isDeletingChat
+              }
+              canDeleteChat={!isSearching && !isDeletingChat}
+              isDeletingChat={isDeletingChat}
+              onClearChat={() => clearMeetingChat(activeChat.id)}
+              onDeleteChat={() => deleteMeetingChat(activeChat.id)}
+              onQueryChange={setQuery}
+              onSubmit={handleMeetingSearch}
+              onSuggestedQuery={setQuery}
+            />
+          ) : null}
 
-                <div className="graph-sync-box">
-                  <p className="eyebrow">Current sync</p>
-                  <code>{graphSyncSummary}</code>
-                </div>
-              </section>
-            ) : null}
-
-            {!hasConversation ? (
-              <form className="search-form" onSubmit={handleSearch}>
-                <textarea
-                  aria-label="Search indexed meetings"
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Ask for summaries, decisions, blockers, or any moment from the recording"
-                  rows={2}
-                />
-                <button className="send-button" type="submit" disabled={isSearching}>
-                  {isSearching ? 'Searching' : 'Search'}
-                </button>
-              </form>
-            ) : null}
-
-            <div className={`status-stack ${hasConversation ? 'compact' : ''}`}>
-              <p>{pipelineSummary}</p>
-              <p>{graphSyncSummary}</p>
-              <p>
-                Storage: <strong>{vectorStoreStatus?.db_path || './chroma_db'}</strong> /{' '}
-                <strong>{vectorStoreStatus?.collection_name || 'meetvault_transcripts'}</strong>
-                {` | ${indexedCount} live / ${totalCount} total chunks`}
-              </p>
-              {sourceCountEntries.length ? (
-                <p>
-                  Sources:{' '}
-                  {sourceCountEntries.map(([sourceType, count]) => `${sourceType} (${count})`).join(', ')}
-                </p>
-              ) : null}
-              {pipelineNotice ? <p className="feedback">{pipelineNotice}</p> : null}
-              {historyError ? <p className="feedback error">{historyError}</p> : null}
-              {searchMessage ? <p className="feedback">{searchMessage}</p> : null}
-            </div>
-          </section>
-
-          {hasConversation ? (
-            <section className="conversation-panel" aria-label="Conversation">
-              {conversationTurns.map((turn) => (
-                <div className="turn-stack" key={turn.id}>
-                  <article className="message-row user">
-                    <div className="message-bubble user">
-                      <p>{turn.query}</p>
-                    </div>
-                  </article>
-
-                  {turn.answer ? (
-                    <article className="message-row assistant">
-                      <div className="message-bubble assistant">
-                        <p className="eyebrow">{answerEyebrowForMode(turn.answer.mode)}</p>
-                        <div className="answer-body">
-                          {turn.answer.text.split('\n').map((line) => (
-                            <p key={`${turn.id}-${line}`}>{line}</p>
-                          ))}
-                        </div>
-                        {turn.sourceCount ? (
-                          <p className="answer-footnote">
-                            Grounded by {turn.sourceCount} retrieved chunk{turn.sourceCount === 1 ? '' : 's'}
-                            {turn.meetingTitle ? ` from ${turn.meetingTitle}` : ''}.
-                          </p>
-                        ) : null}
-                      </div>
-                    </article>
-                  ) : null}
-                </div>
-              ))}
-            </section>
-          ) : (
-            <section className="empty-state" aria-label="Indexing status">
-              <p>
-                Search results will appear here once Graph sync fetches a SharePoint recording or
-                transcript and the backend finishes indexing it into ChromaDB.
-              </p>
-            </section>
-          )}
-
-          {hasConversation ? (
-            <form className="search-form conversation-composer" onSubmit={handleSearch}>
-              <textarea
-                aria-label="Search indexed meetings"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Ask a follow-up about the indexed recordings"
-                rows={2}
-              />
-              <button className="send-button" type="submit" disabled={isSearching}>
-                {isSearching ? 'Searching' : 'Send'}
-              </button>
-            </form>
+          {activeNav === 'workspace' && !activeChat ? (
+            <WorkspaceLanding onOpenMeetings={() => setActiveNav('meetings')} />
           ) : null}
         </main>
       </div>
@@ -901,15 +1429,10 @@ function App() {
                 <p className="eyebrow">Workspace controls</p>
                 <h3 id="settings-title">Settings</h3>
               </div>
-              <button
-                className="subtle-button"
-                type="button"
-                onClick={() => setShowSettings(false)}
-              >
+              <button className="subtle-button" type="button" onClick={() => setShowSettings(false)}>
                 Close
               </button>
             </div>
-
             <div className="settings-tabs" role="tablist" aria-label="Settings sections">
               <button
                 className={settingsView === 'appearance' ? 'active' : ''}
@@ -926,7 +1449,6 @@ function App() {
                 MCP
               </button>
             </div>
-
             {settingsView === 'appearance' ? (
               <div className="appearance-panel">
                 <button

@@ -209,7 +209,7 @@ We are moving forward.
     @patch("app.services.ingestion_service.TranscriptService.list_online_meeting_transcripts")
     @patch("app.services.ingestion_service.TranscriptService.download_online_meeting_transcript")
     @patch("app.services.ingestion_service.TranscriptService.normalize_transcript")
-    def test_load_graph_transcript_chooses_latest_transcript_by_timestamp(
+    def test_load_graph_transcript_merges_all_transcripts_in_order(
         self,
         mock_normalize_transcript,
         mock_download_transcript,
@@ -227,14 +227,21 @@ We are moving forward.
                 "endDateTime": "2024-02-01T10:10:00Z",
             },
         ]
-        mock_normalize_transcript.return_value = [{"text": "latest"}]
+        mock_normalize_transcript.side_effect = [
+            [{"text": "older", "turn_id": 0}],
+            [{"text": "newer", "turn_id": 0}],
+        ]
 
         result = IngestionService._load_graph_transcript("access-token", "online-1")
 
-        self.assertEqual(result, [{"text": "latest"}])
-        mock_download_transcript.assert_called_once()
-        called_args = mock_download_transcript.call_args.args
-        self.assertEqual(called_args[2], "transcript-new")
+        self.assertEqual(
+            result,
+            [
+                {"text": "older", "turn_id": 0},
+                {"text": "newer", "turn_id": 1},
+            ],
+        )
+        self.assertEqual(mock_download_transcript.call_count, 2)
 
     @patch("app.services.ingestion_service.IngestionService._load_graph_transcript", side_effect=HTTPException(status_code=403, detail="Forbidden"))
     @patch("app.services.ingestion_service.OneDriveService.find_meeting_assets")
@@ -354,7 +361,7 @@ We are moving forward.
 
     @patch("app.services.ingestion_service.MeetingService.get_recent_meetings")
     @patch("app.services.ingestion_service.IngestionService.ingest_drive_item")
-    @patch("app.services.ingestion_service.OneDriveService.find_recent_recording_assets")
+    @patch("app.services.ingestion_service.OneDriveService.find_recent_recording_assets_fast")
     @patch("app.services.ingestion_service.IngestionService.discover_graph_recordings")
     def test_ingest_recent_meetings_processes_recorded_assets_without_calendar_failures(
         self,
@@ -428,7 +435,7 @@ We are moving forward.
         mock_store_transcript.assert_called_once()
 
     @patch("app.services.ingestion_service.IngestionService.ingest_drive_item")
-    @patch("app.services.ingestion_service.OneDriveService.find_recent_recording_assets")
+    @patch("app.services.ingestion_service.OneDriveService.find_recent_recording_assets_fast")
     @patch("app.services.ingestion_service.IngestionService.ingest_graph_recording")
     @patch("app.services.ingestion_service.IngestionService.discover_graph_recordings")
     @patch("app.services.ingestion_service.MeetingService.get_recent_meetings")

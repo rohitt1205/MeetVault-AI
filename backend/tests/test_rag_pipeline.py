@@ -194,6 +194,76 @@ class RagPipelineTests(unittest.TestCase):
         self.assertIn("The system summarizes each call automatically.", result["answer"])
         self.assertEqual(result["llm_error"], "Ollama SLM unavailable")
 
+    def test_retrieve_and_answer_handles_greeting_conversationally(self):
+        fake_results = {
+            "documents": [[
+                "00:03:07.000 Unknown: The rose is simply a win you experienced since the last chat.",
+            ]],
+            "metadatas": [[
+                {
+                    "meeting_id": "onedrive-1",
+                    "source_type": "onedrive_video_transcription",
+                    "meeting_title": "6 Tips for Productive 11 Meetings",
+                },
+            ]],
+            "ids": [["onedrive-1:1"]],
+            "distances": [[1.6]],
+        }
+
+        with patch(
+            "app.rag.retrieve.EmbeddingService.generate_query_embedding",
+            return_value=[0.1, 0.2],
+        ), patch(
+            "app.rag.retrieve.ChromaService.query_embeddings",
+            return_value=fake_results,
+        ), patch(
+            "app.rag.retrieve.generate_conversational_answer",
+            return_value="Hi! This recording covers tips for productive 1:1s. Want a quick summary?",
+        ) as mock_conversational:
+            result = retrieve_and_answer("Hi", meeting_id="onedrive-1")
+
+        mock_conversational.assert_called_once()
+        self.assertEqual(result["answer_mode"], "conversational")
+        self.assertIn("productive 1:1s", result["answer"])
+        self.assertNotIn("Information not found", result["answer"])
+
+    def test_retrieve_and_answer_does_not_dump_transcript_for_vague_what(self):
+        fake_results = {
+            "documents": [[
+                "The rose is simply a win you experienced since the last time YouTube had a chat. "
+                "This doesn't have to be a big win, the point is to start the meeting on a positive note.",
+            ]],
+            "metadatas": [[
+                {
+                    "meeting_id": "onedrive-1",
+                    "source_type": "onedrive_video_transcription",
+                    "meeting_title": "6 Tips for Productive 11 Meetings",
+                },
+            ]],
+            "ids": [["onedrive-1:1"]],
+            "distances": [[0.4]],
+        }
+
+        with patch(
+            "app.rag.retrieve.EmbeddingService.generate_query_embedding",
+            return_value=[0.1, 0.2],
+        ), patch(
+            "app.rag.retrieve.ChromaService.query_embeddings",
+            return_value=fake_results,
+        ), patch(
+            "app.rag.retrieve.generate_conversational_answer",
+            return_value="Not sure what you meant — want a summary of the 1:1 tips from this video?",
+        ), patch(
+            "app.rag.retrieve.generate_answer",
+            return_value="Information not found in the provided context.",
+        ) as mock_rag_answer:
+            result = retrieve_and_answer("What?", meeting_id="onedrive-1")
+
+        mock_rag_answer.assert_not_called()
+        self.assertEqual(result["answer_mode"], "conversational")
+        self.assertLess(len(result["answer"]), 400)
+        self.assertNotIn("YouTube had a chat", result["answer"])
+
 
 if __name__ == "__main__":
     unittest.main()

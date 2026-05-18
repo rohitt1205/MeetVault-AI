@@ -7,7 +7,8 @@ function Login() {
     await supabase.auth.signInWithOAuth({
       provider: "azure",
       options: {
-        scopes: "openid profile email User.Read"
+        scopes:
+          "openid profile email offline_access User.Read Calendars.Read Files.Read OnlineMeetings.Read OnlineMeetingTranscript.Read.All"
       }
     });
 

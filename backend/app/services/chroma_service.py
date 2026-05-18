@@ -83,10 +83,15 @@ class ChromaService:
             }
 
         requested_pool_size = candidate_pool_size or max(n_results * 10, 50)
-        raw_limit = min(
-            collection_count,
-            n_results if meeting_id else max(requested_pool_size, n_results),
-        )
+        if candidate_pool_size:
+            pool_cap = max(requested_pool_size, n_results)
+        else:
+            pool_cap = (
+                n_results
+                if meeting_id
+                else max(requested_pool_size, n_results)
+            )
+        raw_limit = min(collection_count, pool_cap)
         response = ChromaService.collection.query(
             query_embeddings=[query_embedding],
             n_results=raw_limit,
@@ -128,6 +133,48 @@ class ChromaService:
             "metadatas": [filtered_metadatas],
             "distances": [filtered_distances],
             "ids": [filtered_ids],
+        }
+
+    @staticmethod
+    def list_indexed_meetings() -> list[dict]:
+        data = ChromaService.collection.get()
+        metadatas = data.get("metadatas", [])
+        meetings_by_id: dict[str, dict] = {}
+
+        for metadata in metadatas:
+            if not isinstance(metadata, dict):
+                continue
+
+            meeting_id = metadata.get("meeting_id")
+            if not meeting_id:
+                continue
+            if str(meeting_id).startswith(("sharepoint-", "onedrive-", "rag-")):
+                continue
+
+            meetings_by_id[meeting_id] = {
+                "event_id": meeting_id,
+                "meeting_id": meeting_id,
+                "title": metadata.get("meeting_title") or "Indexed meeting",
+                "organizer": "MeetVault index",
+                "is_indexed": True,
+                "has_recording": True,
+            }
+
+        return list(meetings_by_id.values())
+
+    @staticmethod
+    def delete_meeting_embeddings(meeting_id: str) -> dict:
+        if not meeting_id:
+            return {"meeting_id": meeting_id, "deleted_chunks": 0}
+
+        results = ChromaService.collection.get(where={"meeting_id": meeting_id})
+        chunk_ids = results.get("ids") or []
+        if chunk_ids:
+            ChromaService.collection.delete(ids=chunk_ids)
+
+        return {
+            "meeting_id": meeting_id,
+            "deleted_chunks": len(chunk_ids),
         }
 
     @staticmethod

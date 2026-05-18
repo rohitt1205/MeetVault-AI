@@ -8,6 +8,7 @@ REQUIRED_GRAPH_SCOPES = (
     "Calendars.Read",
     "Files.Read",
     "OnlineMeetings.Read",
+    "OnlineMeetingTranscript.Read.All",
 )
 GRAPH_AUDIENCES = {
     "00000003-0000-0000-c000-000000000000",
