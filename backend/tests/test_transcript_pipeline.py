@@ -160,15 +160,19 @@ We are moving forward.
             "event-1",
             "PROCESSING",
             meeting_title="Weekly Sync",
+            stage="discover",
+            message="Discovering meeting resources.",
         )
         mock_mark_status.assert_any_call(
             "event-1",
             "EMBEDDED",
             meeting_title="Weekly Sync",
             source_type="graph_transcript",
+            stage="ready",
             transcript_turns=1,
             chunks=1,
             stored_chunks=1,
+            message="Meeting is ready for chat.",
         )
 
     @patch("app.services.ingestion_service.IngestionService._load_transcript_for_meeting", return_value=([], "none"))
@@ -199,11 +203,15 @@ We are moving forward.
             "event-1",
             "PROCESSING",
             meeting_title="Weekly Sync",
+            stage="discover",
+            message="Discovering meeting resources.",
         )
         mock_mark_status.assert_any_call(
             "event-1",
             "NO_TRANSCRIPT",
             meeting_title="Weekly Sync",
+            stage="failed",
+            message="No transcript or transcribable recording found.",
         )
 
     @patch("app.services.ingestion_service.TranscriptService.list_online_meeting_transcripts")
@@ -246,10 +254,13 @@ We are moving forward.
     @patch("app.services.ingestion_service.IngestionService._load_graph_transcript", side_effect=HTTPException(status_code=403, detail="Forbidden"))
     @patch("app.services.ingestion_service.OneDriveService.find_meeting_assets")
     @patch("app.services.ingestion_service.RecordingService.transcribe_drive_item")
-    @patch("app.services.ingestion_service.MeetingService.resolve_online_meeting_id", return_value="online-1")
+    @patch(
+        "app.services.ingestion_service.MeetingService.resolve_online_meeting",
+        return_value={"online_meeting_id": "online-1", "graph_user_id": "me"},
+    )
     def test_load_transcript_for_meeting_falls_back_when_transcript_access_is_forbidden(
         self,
-        mock_resolve_online_meeting_id,
+        mock_resolve_online_meeting,
         mock_transcribe_drive_item,
         mock_find_meeting_assets,
         _mock_load_graph_transcript,
@@ -280,7 +291,7 @@ We are moving forward.
 
         self.assertEqual(source_type, "onedrive_video_transcription")
         self.assertEqual(transcript[0]["text"], "fallback transcript")
-        mock_resolve_online_meeting_id.assert_called_once()
+        mock_resolve_online_meeting.assert_called_once()
         mock_find_meeting_assets.assert_called_once()
 
     @patch("app.services.ingestion_service.IngestionStateService.is_processed", return_value=False)
