@@ -489,22 +489,19 @@ Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8000/ingestion/status" | Se
 
 ## EC2 Deployment
 
-MeetVault is deployed on an Ubuntu EC2 instance with Docker Compose.
+MeetVault is currently deployed on AWS EC2 using Docker Compose. The deployment runs the FastAPI backend, React frontend preview server, ChromaDB runtime volume, and host-level Ollama service on the same instance.
 
-Recommended instance:
-
-```text
-m7i-flex.large or larger
-```
-
-Minimum practical resources:
+Current deployment shape:
 
 ```text
-8 GB RAM
-40-60 GB EBS storage
+AMI: Ubuntu Server 26.04 LTS, 64-bit x86
+Instance family used for demo: m7i-flex.large class or equivalent
+Storage: 40-60 GB EBS recommended for Docker images, ChromaDB, and model/runtime data
+Frontend site URL: http://<EC2_PUBLIC_IP>:4173
+Backend API URL: http://<EC2_PUBLIC_IP>:8080
 ```
 
-Required inbound security group ports:
+Public ports used:
 
 ```text
 22    SSH
@@ -512,78 +509,17 @@ Required inbound security group ports:
 8080  Backend API
 ```
 
-Deployment steps on EC2:
+Runtime persistence:
 
-```bash
-sudo apt update
-sudo apt install -y docker.io docker-compose-plugin git
-sudo usermod -aG docker ubuntu
+```text
+ChromaDB: Docker volume mounted at /data/chroma_db
+MCP connection state: Docker volume path /data/mcp_connections.json
 ```
 
-Log out and log in again, then:
-
-```bash
-git clone https://github.com/rohitt1205/MeetVault-AI.git
-cd MeetVault-AI
-cp .env.ec2.example .env.ec2
-nano .env.ec2
-```
-
-Fill:
-
-```env
-VITE_API_BASE_URL=http://YOUR_EC2_PUBLIC_IP:8080
-FRONTEND_ORIGIN=http://YOUR_EC2_PUBLIC_IP:4173
-FRONTEND_ORIGINS=http://YOUR_EC2_PUBLIC_IP:4173,http://localhost:5173,http://127.0.0.1:5173
-VITE_SUPABASE_URL=your_supabase_url
-VITE_SUPABASE_PUBLISHABLE_KEY=your_supabase_publishable_key
-RAG_MODEL=qwen2.5:7b
-OLLAMA_HOST=http://host.docker.internal:11434
-```
-
-Start Ollama on the EC2 host:
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-OLLAMA_HOST=0.0.0.0:11434 ollama serve
-```
-
-In another SSH session:
-
-```bash
-ollama pull qwen2.5:7b
-docker compose --env-file .env.ec2 up --build -d
-```
-
-Health checks:
-
-```bash
-docker compose ps
-curl http://localhost:8080/
-curl -I http://localhost:4173
-```
-
-Expected backend response:
+Backend health response:
 
 ```json
 {"message":"MeetVault AI Backend Running"}
-```
-
-Open the app:
-
-```text
-http://YOUR_EC2_PUBLIC_IP:4173
-```
-
-Supabase Auth must include the deployed frontend URL:
-
-```text
-Site URL: http://YOUR_EC2_PUBLIC_IP:4173
-Redirect URLs:
-http://YOUR_EC2_PUBLIC_IP:4173
-http://YOUR_EC2_PUBLIC_IP:4173/**
-http://localhost:5173
-http://127.0.0.1:5173
 ```
 
 ## Current Limitations
