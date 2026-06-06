@@ -1,0 +1,90 @@
+{
+  "srinithi.v@relanto.ai": {
+    "jira": [
+      {
+        "name": "get_jira_tickets",
+        "description": "Fetches Jira issues and tasks assigned to the authenticated user.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ],
+    "slack": [
+      {
+        "name": "get_slack_mentions",
+        "description": "Fetches recent user mentions and messages from Slack.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ],
+    "github": [
+      {
+        "name": "get_github_issues",
+        "description": "Fetches open GitHub issues assigned to the authenticated user.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      },
+      {
+        "name": "get_github_prs",
+        "description": "Fetches open GitHub pull requests created by the user.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      },
+      {
+        "name": "get_github_reviews",
+        "description": "Fetches pull requests awaiting review by the user.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ],
+    "calendar": [
+      {
+        "name": "get_calendar_events",
+        "description": "Fetches upcoming meetings and calendar schedule from Microsoft Calendar.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ],
+    "outlook": [
+      {
+        "name": "get_outlook_emails",
+        "description": "Fetches unread important or flagged emails from Microsoft Outlook.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ]
+  },
+  "dev@example.com": {
+    "jira": [
+      {
+        "name": "get_jira_tickets",
+        "description": "Fetches Jira issues and tasks assigned to the authenticated user.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ]
+  }
+}

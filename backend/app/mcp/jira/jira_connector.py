@@ -35,28 +35,22 @@ def verify_and_connect(
             headers={"Accept": "application/json"},
             timeout=15,
         )
+        if not response.ok:
+            raise HTTPException(status_code=401, detail=f"Jira credential verification failed: {response.text}")
+        data = response.json()
+        return {
+            "connected": True,
+            "display_name": data.get("displayName") or "Jira User",
+            "email": email.strip(),
+            "domain": clean_domain,
+            "account_id": data.get("accountId"),
+            "token": api_token,
+        }
     except requests.RequestException as exc:
         raise HTTPException(
             status_code=502,
-            detail=f"Jira connection request failed: {exc}",
+            detail=f"Jira credential verification failed: {exc}",
         ) from exc
-
-    if not response.ok:
-        raise HTTPException(
-            status_code=response.status_code,
-            detail=f"Jira authentication failed: {response.text}",
-        )
-
-    data = response.json()
-
-    return {
-        "connected": True,
-        "display_name": data.get("displayName"),
-        "email": email.strip(),
-        "domain": clean_domain,
-        "account_id": data.get("accountId"),
-        "token": api_token,
-    }
 
 def fetch_tickets(
     email: str,

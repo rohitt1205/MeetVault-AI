@@ -1,6 +1,5 @@
 import base64
 import json
-import os
 from typing import Any
 
 
@@ -49,10 +48,6 @@ class TokenDiagnosticsService:
             for scope in REQUIRED_GRAPH_SCOPES
             if scope not in scopes
         ]
-        backend_app_configured = all(
-            os.getenv(key)
-            for key in ("MS_CLIENT_ID", "MS_CLIENT_SECRET", "MS_TENANT_ID")
-        )
         audience = claims.get("aud")
         is_graph_token = audience in GRAPH_AUDIENCES
 
@@ -73,5 +68,4 @@ class TokenDiagnosticsService:
                 "Calendars.Read" in scopes
                 and "Files.Read" in scopes
             ),
-            "backend_app_configured": backend_app_configured,
         }

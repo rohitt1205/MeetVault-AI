@@ -8,10 +8,9 @@ from fastapi import HTTPException
 def _github_config() -> tuple[str, str, str]:
     client_id = os.getenv("GITHUB_CLIENT_ID")
     client_secret = os.getenv("GITHUB_CLIENT_SECRET")
-    redirect_uri = os.getenv(
-        "GITHUB_REDIRECT_URI",
-        "http://127.0.0.1:8000/mcp/github/callback",
-    )
+    redirect_uri = os.getenv("GITHUB_REDIRECT_URI")
+    if not redirect_uri or "YOUR_EC2_PUBLIC_IP" in redirect_uri or "YOUR_" in redirect_uri:
+        redirect_uri = "http://localhost:8000/mcp/github/callback"
 
     missing = [
         name
@@ -40,7 +39,8 @@ def get_github_login_url(user_key: str):
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": "read:user repo",
-            "state": (user_key or "demo").lower().strip(),
+            # Keep the state token exact; it is an opaque value used to restore the user context.
+            "state": (user_key or "demo").strip(),
             "allow_signup": "true",
         }
     )

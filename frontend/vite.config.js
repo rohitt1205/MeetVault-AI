@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
+  envDir: '../',
   plugins: [react()],
   server: {
     proxy: {
@@ -14,11 +15,6 @@ export default defineConfig({
         timeout: 600_000,
         proxyTimeout: 600_000,
       },
-    },
-  },
-  build: {
-    rollupOptions: {
-      input: 'index.html',
     },
   },
 })

@@ -1,8 +1,15 @@
 import re
+import json
 
 from app.mcp.mcp_manager import MCPManager
+from app.mcp.github import github_connector
+from app.mcp.outlook import outlook_connector
+from app.mcp.calendar import calendar_connector
+from app.mcp.slack import slack_connector
+from app.mcp.salesforce import salesforce_connector
+from app.mcp.connection_store import MCPConnectionStore
 from app.rag.llm import generate_answer, generate_conversational_answer
-from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT
+from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT, WORK_SUMMARY_PROMPT
 from app.services.answer_service import AnswerService
 from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
@@ -37,6 +44,7 @@ STOPWORDS = {
     "what",
 }
 LOW_SIGNAL_WORDS = {"ah", "hmm", "okay", "ok", "um", "uh", "yeah", "yes", "you"}
+
 JIRA_KEYWORDS = {
     "jira",
     "ticket",
@@ -47,6 +55,68 @@ JIRA_KEYWORDS = {
     "issue",
     "issues",
     "sprint",
+}
+GITHUB_KEYWORDS = {
+    "github",
+    "pr",
+    "prs",
+    "pull request",
+    "pull requests",
+    "review",
+    "reviews",
+    "issue",
+    "issues",
+    "repo",
+    "repos",
+    "repository",
+    "repositories",
+}
+OUTLOOK_KEYWORDS = {
+    "outlook",
+    "email",
+    "emails",
+    "mail",
+    "mails",
+    "inbox",
+    "message",
+    "messages",
+}
+CALENDAR_KEYWORDS = {
+    "calendar",
+    "meeting",
+    "meetings",
+    "schedule",
+    "appointment",
+    "appointments",
+    "deadline",
+    "deadlines",
+    "sprint event",
+    "sprint events",
+    "availability",
+}
+SLACK_KEYWORDS = {
+    "slack",
+    "message",
+    "messages",
+    "chat",
+    "mention",
+    "mentions",
+    "thread",
+    "threads",
+}
+SALESFORCE_KEYWORDS = {
+    "salesforce",
+    "lead",
+    "leads",
+    "opportunity",
+    "opportunities",
+    "deal",
+    "deals",
+    "customer",
+    "customers",
+    "client",
+    "clients",
+    "pipeline",
 }
 
 NOT_FOUND_ANSWER = "Information not found in the provided context."
@@ -259,40 +329,318 @@ def _generate_conversational_response(user_query: str, sources: list[dict]) -> d
     }
 
 
-def _append_jira_context(user_query: str, user_key: str, sources: list[dict]) -> tuple[str, list[dict]]:
-    query_terms = _tokens(user_query)
-    if not query_terms & JIRA_KEYWORDS:
-        return "", sources
+def _detect_tool_calls_with_llm(
+    query: str,
+    active_tools: list[dict],
+) -> list[dict]:
+    if not active_tools:
+        return []
+        
+    schemas = []
+    for tool in active_tools:
+        schemas.append({
+            "provider": tool["provider"],
+            "tool_name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["parameters"]
+        })
+        
+    prompt = f"""You are MeetVault's Query Routing Agent. Determine which of the available enterprise tools (if any) are needed to answer the user query.
+    
+Available Tools:
+{json.dumps(schemas, indent=2)}
 
-    jira_tickets = MCPManager.get_jira_tickets(user_key)
-    if not jira_tickets:
-        return "", sources
+User Query: "{query}"
 
-    jira_context = "\n".join(
-        f"[{ticket['ticket_id']}] {ticket['summary']} (Status: {ticket['status']})"
-        for ticket in jira_tickets
-    )
-    mcp_source = {
-        "chunk_id": "mcp-jira-live",
-        "distance": 0.0,
-        "text": f"Found {len(jira_tickets)} live Jira ticket(s) assigned to {user_key}.",
-        "metadata": {
-            "source_type": "mcp_jira",
-            "meeting_title": "Jira Workspace",
-            "meeting_id": "mcp-jira-live",
-        },
-    }
-    return f"\n\n---\n\nSource: Jira Workspace\n{jira_context}", [*sources, mcp_source]
+If a tool is relevant:
+Return a JSON object with key "tool_calls" listing the tools to run and their extracted parameters.
+Return ONLY valid JSON. No conversational text. No markdown formatting. If no tools match, return:
+{{"tool_calls": []}}
+
+Example Output:
+{{"tool_calls": [{{"provider": "jira", "tool_name": "get_jira_tickets", "arguments": {{}}}}]}}
+"""
+    try:
+        from app.rag.llm import generate_answer
+        response_text = generate_answer(prompt, query=query, context="Query routing intent detection")
+        if "```" in response_text:
+            cleaned = re.search(r"```(?:json)?\s*(.*?)\s*```", response_text, re.DOTALL)
+            if cleaned:
+                response_text = cleaned.group(1)
+        response_text = response_text.strip()
+        data = json.loads(response_text)
+        return data.get("tool_calls", [])
+    except Exception as e:
+        print(f"LLM tool detection failed, falling back to keyword routing: {e}")
+        return []
+
+
+def _detect_tool_calls_fallback(
+    query: str,
+    active_tools: list[dict],
+) -> list[dict]:
+    query_tokens = _tokens(query)
+    is_work_summary = query.strip().lower() == "summarize my work today"
+    
+    matched = []
+    for tool in active_tools:
+        provider = tool["provider"]
+        tool_name = tool["name"]
+        
+        if is_work_summary:
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+            continue
+            
+        if provider == "jira" and (query_tokens & JIRA_KEYWORDS):
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+        elif provider == "github" and (query_tokens & GITHUB_KEYWORDS):
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+        elif provider == "slack" and (query_tokens & SLACK_KEYWORDS):
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+        elif provider == "salesforce" and (query_tokens & SALESFORCE_KEYWORDS):
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+        elif provider == "outlook" and (query_tokens & OUTLOOK_KEYWORDS):
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+        elif provider == "calendar" and (query_tokens & CALENDAR_KEYWORDS):
+            matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+        elif provider.startswith("mcp:"):
+            desc_tokens = _tokens(tool.get("description", "")) | _tokens(tool_name)
+            if query_tokens & desc_tokens:
+                matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
+                
+    return matched
+
+
+def _get_mcp_context(
+    user_query: str,
+    user_key: str,
+    graph_jwt: str | None = None,
+    supabase_jwt: str | None = None,
+) -> tuple[str, list[dict], bool]:
+    """
+    Analyzes the query and pulls context from connected tools dynamically using the ToolRegistry.
+    """
+    is_work_summary = user_query.strip().lower() == "summarize my work today"
+    
+    from app.mcp.tool_registry import MCPToolRegistry
+    active_tools = MCPToolRegistry.get_active_tools(user_key, supabase_jwt)
+    
+    tool_calls = _detect_tool_calls_with_llm(user_query, active_tools)
+    if not tool_calls:
+        tool_calls = _detect_tool_calls_fallback(user_query, active_tools)
+        
+    context_parts = []
+    mcp_sources = []
+    
+    seen_calls = set()
+    deduped_tool_calls = []
+    for call in tool_calls:
+        call_key = (call.get("provider"), call.get("tool_name"))
+        if call_key not in seen_calls:
+            seen_calls.add(call_key)
+            deduped_tool_calls.append(call)
+            
+    for call in deduped_tool_calls:
+        provider = call.get("provider")
+        tool_name = call.get("tool_name")
+        arguments = call.get("arguments") or {}
+        
+        try:
+            result = MCPManager.execute_tool(
+                provider, tool_name, arguments, user_key, graph_jwt, supabase_jwt
+            )
+            
+            formatted_text = f"Result of {provider}:{tool_name} execution:\n{json.dumps(result, indent=2)}"
+            
+            if provider == "jira" and tool_name == "get_jira_tickets":
+                if isinstance(result, list) and result:
+                    ticket_str = "\n".join(
+                        f"- [{t['ticket_id']}] {t['summary']} (Status: {t['status']})"
+                        for t in result
+                    )
+                    formatted_text = f"### Jira Tasks Assigned to Me:\n{ticket_str}"
+                else:
+                    formatted_text = "### Jira Tasks Assigned to Me:\nNo open tickets found."
+                    
+            elif provider == "github":
+                if tool_name == "get_github_issues":
+                    if isinstance(result, list) and result:
+                        formatted_text = "### GitHub Assigned Issues:\n" + "\n".join(
+                            f"- #{i['issue_id']} {i['title']} ({i['repo']})" for i in result
+                        )
+                    else:
+                        formatted_text = "### GitHub Assigned Issues:\nNo open issues."
+                elif tool_name == "get_github_prs":
+                    if isinstance(result, list) and result:
+                        formatted_text = "### GitHub Pull Requests:\n" + "\n".join(
+                            f"- #{p['pr_id']} {p['title']} (Status: {p['status']})" for p in result
+                        )
+                    else:
+                        formatted_text = "### GitHub Pull Requests:\nNo open pull requests."
+                elif tool_name == "get_github_reviews":
+                    if isinstance(result, list) and result:
+                        formatted_text = "### GitHub PRs Awaiting Review:\n" + "\n".join(
+                            f"- #{r['pr_id']} {r['title']}" for r in result
+                        )
+                    else:
+                        formatted_text = "### GitHub PRs Awaiting Review:\nNo pending reviews."
+                        
+            elif provider == "slack" and tool_name == "get_slack_mentions":
+                if isinstance(result, list) and result:
+                    mention_str = "\n".join(
+                        f"- From @{m['user']} in #{m['channel']}: {m['text']}"
+                        for m in result
+                    )
+                    formatted_text = f"### Slack Mentions & Messages:\n{mention_str}"
+                else:
+                    formatted_text = "### Slack Mentions & Messages:\nNo recent mentions found."
+                    
+            elif provider == "salesforce" and tool_name == "get_salesforce_opportunities":
+                opps = result.get("opportunities", []) if isinstance(result, dict) else []
+                leads = result.get("leads", []) if isinstance(result, dict) else []
+                parts = []
+                if opps:
+                    parts.append(
+                        "Opportunities:\n"
+                        + "\n".join(
+                            f"- {o['name']} (Value: ${o['amount']}, Stage: {o['stage']})"
+                            for o in opps
+                        )
+                    )
+                if leads:
+                    parts.append(
+                        "Leads:\n"
+                        + "\n".join(
+                            f"- {l['name']} (Company: {l['company']}, Status: {l['status']})"
+                            for l in leads
+                        )
+                    )
+                if parts:
+                    formatted_text = "### Salesforce Customer Context:\n" + "\n\n".join(parts)
+                else:
+                    formatted_text = "### Salesforce Customer Context:\nNo opportunities or leads."
+                    
+            elif provider == "outlook" and tool_name == "get_outlook_emails":
+                unread = result.get("unread_important", []) if isinstance(result, dict) else []
+                flagged = result.get("flagged", []) if isinstance(result, dict) else []
+                action = result.get("action_required", []) if isinstance(result, dict) else []
+                parts = []
+                if unread:
+                    parts.append(
+                        "Unread Important Emails:\n"
+                        + "\n".join(f"- From: {e['from']} | Subject: {e['subject']}" for e in unread)
+                    )
+                if flagged:
+                    parts.append(
+                        "Flagged Emails:\n"
+                        + "\n".join(f"- From: {e['from']} | Subject: {e['subject']}" for e in flagged)
+                    )
+                if action:
+                    parts.append(
+                        "Action Required / Follow-up Emails:\n"
+                        + "\n".join(f"- From: {e['from']} | Subject: {e['subject']}" for e in action)
+                    )
+                if parts:
+                    formatted_text = "### Outlook Emails:\n" + "\n\n".join(parts)
+                else:
+                    formatted_text = "### Outlook Emails:\nNo urgent emails."
+                    
+            elif provider == "calendar" and tool_name == "get_calendar_events":
+                meetings = result.get("upcoming_meetings", []) if isinstance(result, dict) else []
+                deadlines = result.get("deadlines", []) if isinstance(result, dict) else []
+                parts = []
+                if meetings:
+                    parts.append(
+                        "Upcoming Meetings:\n"
+                        + "\n".join(f"- {m['subject']} (Organizer: {m['organizer']}, Start: {m['start']})" for m in meetings)
+                    )
+                if deadlines:
+                    parts.append(
+                        "Upcoming Deadlines:\n"
+                        + "\n".join(f"- {d['subject']} (Due: {d['due_date']})" for d in deadlines)
+                    )
+                if parts:
+                    formatted_text = "### Calendar Schedule:\n" + "\n\n".join(parts)
+                else:
+                    formatted_text = "### Calendar Schedule:\nNo upcoming events."
+
+            context_parts.append(formatted_text)
+            
+            source_type = f"mcp_{provider.split(':')[0]}"
+            mcp_sources.append({
+                "chunk_id": f"mcp-{provider}-{tool_name}-live",
+                "distance": 0.0,
+                "text": f"Retrieved tool data from {provider}:{tool_name}.",
+                "metadata": {
+                    "source_type": source_type,
+                    "meeting_title": f"{provider} integration",
+                    "meeting_id": f"mcp-{provider}-{tool_name}-live",
+                }
+            })
+            
+        except Exception as e:
+            print(f"Error executing tool {provider}:{tool_name}: {e}")
+            context_parts.append(f"### {provider.capitalize()}:\nFailed to retrieve data from {provider} ({e}).")
+
+    if is_work_summary:
+        conns = MCPManager.get_all_connections(user_key, graph_jwt, supabase_jwt)
+        for standard in ["jira", "github", "slack", "outlook", "calendar"]:
+            conn_state = conns.get(standard, {})
+            if not conn_state.get("connected"):
+                if standard == "jira":
+                    context_parts.append("### Jira Tasks Assigned to Me:\nJira is not connected. Connect Jira in Settings.")
+                elif standard == "github":
+                    context_parts.append("### GitHub Workspace:\nGitHub is not connected. Connect GitHub in Settings.")
+                elif standard == "slack":
+                    context_parts.append("### Slack Mentions & Messages:\nSlack is not connected. Connect Slack in Settings.")
+                elif standard == "outlook":
+                    context_parts.append("### Outlook Emails:\nOutlook is not connected. Sign in with Microsoft Graph scopes.")
+                elif standard == "calendar":
+                    context_parts.append("### Calendar Schedule:\nCalendar is not connected. Sign in with Microsoft Graph scopes.")
+
+    return "\n\n---\n\n".join(context_parts), mcp_sources, is_work_summary
 
 
 def retrieve_and_answer(
     user_query: str,
     meeting_id: str | None = None,
     user_key: str = "demo",
+    graph_jwt: str | None = None,
+    supabase_jwt: str | None = None,
 ) -> dict:
     """
     Retrieves relevant transcript chunks from ChromaDB and generates a grounded answer.
     """
+    mcp_context, mcp_sources, is_work_summary = _get_mcp_context(
+        user_query,
+        user_key,
+        graph_jwt=graph_jwt,
+        supabase_jwt=supabase_jwt,
+    )
+
+    if is_work_summary:
+        prompt = WORK_SUMMARY_PROMPT.format(context=mcp_context)
+        llm_error = None
+        try:
+            answer = generate_answer(prompt, query=user_query, context=mcp_context)
+            answer_mode = "work_summary"
+        except Exception as exc:
+            llm_error = str(exc)
+            answer = (
+                "Here is the retrieved status dashboard:\n\n"
+                f"{mcp_context}\n\n"
+                "*(Note: The LLM synthesis failed, displaying raw context above.)*"
+            )
+            answer_mode = "work_summary_fallback"
+
+        return {
+            "query": user_query,
+            "answer": answer,
+            "answer_mode": answer_mode,
+            "llm_error": llm_error,
+            "sources": mcp_sources,
+        }
+
     query_embedding = EmbeddingService.generate_query_embedding(user_query)
 
     results = ChromaService.query_embeddings(
@@ -309,9 +657,34 @@ def retrieve_and_answer(
     retrieved_ids = results.get("ids", [[]])[0]
 
     if not retrieved_documents:
+        if mcp_context:
+            safe_query = user_query.replace("{", "{{").replace("}", "}}")
+            final_prompt = RAG_SYSTEM_PROMPT.format(
+                context=mcp_context,
+                query=safe_query,
+            )
+            llm_error = None
+            try:
+                answer = generate_answer(
+                    final_prompt, query=user_query, context=mcp_context
+                )
+                answer_mode = "mcp_only_answer"
+            except Exception as exc:
+                llm_error = str(exc)
+                answer = f"I found the following tool context:\n\n{mcp_context}"
+                answer_mode = "mcp_only_fallback"
+
+            return {
+                "query": user_query,
+                "answer": answer,
+                "answer_mode": answer_mode,
+                "llm_error": llm_error,
+                "sources": mcp_sources,
+            }
+
         return {
             "query": user_query,
-            "answer": "I don't have any meeting transcripts to answer that question.",
+            "answer": "I don't have any meeting transcripts or connected tool context to answer that.",
             "answer_mode": "no_context",
             "sources": [],
         }
@@ -331,9 +704,9 @@ def retrieve_and_answer(
         [source for source in candidate_sources if _is_queryable_source(source)],
     )
 
-    jira_context, sources = _append_jira_context(user_query, user_key, sources)
+    all_sources = [*sources, *mcp_sources]
 
-    if not sources:
+    if not all_sources:
         return {
             "query": user_query,
             "answer": (
@@ -345,14 +718,17 @@ def retrieve_and_answer(
         }
 
     if AnswerService.is_vague_or_social_query(user_query):
-        return _generate_conversational_response(user_query, sources)
+        return _generate_conversational_response(user_query, all_sources)
 
     context_text = "\n\n---\n\n".join(
         f"Source: {(source.get('metadata') or {}).get('meeting_title') or 'Untitled meeting'}\n{source.get('text') or ''}"
-        for source in sources
-        if (source.get("metadata") or {}).get("source_type") != "mcp_jira"
+        for source in all_sources
+        if (source.get("metadata") or {}).get("source_type") not in (
+            "mcp_jira", "mcp_github", "mcp_outlook", "mcp_calendar", "mcp_slack", "mcp_salesforce"
+        )
     )
-    context_text = f"{context_text}{jira_context}".strip()
+    if mcp_context:
+        context_text = f"{context_text}\n\n---\n\n{mcp_context}".strip()
 
     safe_query = user_query.replace("{", "{{").replace("}", "}}")
     final_prompt = RAG_SYSTEM_PROMPT.format(
@@ -362,11 +738,13 @@ def retrieve_and_answer(
 
     llm_error = None
     try:
-        answer = generate_answer(final_prompt, query=user_query, context=context_text)
+        answer = generate_answer(
+            final_prompt, query=user_query, context=context_text
+        )
         answer_mode = "rag_answer"
     except Exception as exc:
         llm_error = str(exc)
-        fallback_answer = AnswerService.compose(user_query, sources)
+        fallback_answer = AnswerService.compose(user_query, all_sources)
         if fallback_answer:
             answer = fallback_answer["text"]
             answer_mode = fallback_answer["mode"]
@@ -379,14 +757,14 @@ def retrieve_and_answer(
 
     if _is_not_found_answer(answer) or _looks_like_transcript_dump(answer):
         if AnswerService.is_vague_or_social_query(user_query):
-            return _generate_conversational_response(user_query, sources)
+            return _generate_conversational_response(user_query, all_sources)
 
-        fallback_answer = AnswerService.compose(user_query, sources)
+        fallback_answer = AnswerService.compose(user_query, all_sources)
         if fallback_answer:
             answer = fallback_answer["text"]
             answer_mode = fallback_answer["mode"]
         else:
-            title = _meeting_title_from_sources(sources)
+            title = _meeting_title_from_sources(all_sources)
             answer = (
                 f"I couldn't find a clear answer to that in **{title}**. "
                 "Try asking for a summary, the main tips, or a specific topic from the meeting."
@@ -398,5 +776,5 @@ def retrieve_and_answer(
         "answer": answer,
         "answer_mode": answer_mode,
         "llm_error": llm_error,
-        "sources": sources,
+        "sources": all_sources,
     }

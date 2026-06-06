@@ -4,6 +4,9 @@ import MCPPanel from './components/mcp/MCPPanel'
 import MeetingsGridView from './views/MeetingsGridView'
 import MeetingChatView from './views/MeetingChatView'
 import WorkspaceLanding from './views/WorkspaceLanding'
+import OnboardingView from './views/OnboardingView'
+import { publishMcpOAuthEvent, subscribeMcpOAuthEvents } from './utils/mcpOAuthSync'
+import { mcpService } from './services/mcpService'
 import {
   CHAT_HISTORY_TABLE,
   CHAT_SELECT_FIELDS,
@@ -26,9 +29,9 @@ const CATALOG_SYNC_MS = 5 * 60 * 1000
 const REQUIRED_LOGIN_SCOPES =
   'openid profile email offline_access User.Read Calendars.Read Files.Read OnlineMeetings.Read OnlineMeetingTranscript.Read.All'
 const THEME_STORAGE_KEY = 'meetvault-theme'
+const GRAPH_TOKEN_STORAGE_KEY = 'meetvault-graph-token'
 const SUMMARY_PROMPT =
   'Provide a concise executive summary of this meeting: key topics, decisions, action items, and open questions.'
-
 const mcpServers = [
   {
     id: 'graph',
@@ -44,10 +47,15 @@ const mcpServers = [
   },
 ]
 
+let currentSupabaseToken = ''
+
 const bearerHeaders = (token, extraHeaders = {}) => {
   const headers = { ...extraHeaders }
   if (token) {
     headers.Authorization = `Bearer ${token}`
+  }
+  if (currentSupabaseToken) {
+    headers['X-Supabase-Token'] = currentSupabaseToken
   }
   return headers
 }
@@ -135,6 +143,7 @@ function App() {
   const [session, setSession] = useState(undefined)
   const [showProfile, setShowProfile] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(false)
   const [settingsView, setSettingsView] = useState('appearance')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || 'light')
 
@@ -169,8 +178,9 @@ function App() {
   const [isDeletingChat, setIsDeletingChat] = useState(false)
   const [searchMessage, setSearchMessage] = useState('')
   const [pipelineNotice, setPipelineNotice] = useState('')
+  const mcpAutoConnectRef = useRef(false)
 
-  const graphToken = session?.provider_token || ''
+  const graphToken = session?.provider_token || localStorage.getItem(GRAPH_TOKEN_STORAGE_KEY) || ''
   const supabaseToken = session?.access_token || ''
   const backendToken = graphToken || supabaseToken
   const user = session?.user
@@ -194,6 +204,57 @@ function App() {
     document.documentElement.dataset.theme = theme
     localStorage.setItem(THEME_STORAGE_KEY, theme)
   }, [theme])
+
+  useEffect(() => {
+    if (session?.provider_token) {
+      localStorage.setItem(GRAPH_TOKEN_STORAGE_KEY, session.provider_token)
+      return
+    }
+    if (!session) {
+      localStorage.removeItem(GRAPH_TOKEN_STORAGE_KEY)
+    }
+  }, [session])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const oauthProviders = ['github', 'slack', 'salesforce', 'notion', 'gmail']
+    const returnedProvider = oauthProviders.find((provider) => params.has(`${provider}_connected`))
+
+    if (!returnedProvider) {
+      return
+    }
+
+    const connected = params.get(`${returnedProvider}_connected`) === 'true'
+    const error = params.get('mcp_error') || ''
+
+    try {
+      localStorage.setItem(
+        'meetvault-mcp-oauth-event',
+        JSON.stringify({
+          provider: returnedProvider,
+          connected,
+          error,
+          ts: Date.now(),
+        }),
+      )
+    } catch (storageError) {
+      console.error('Could not broadcast MCP OAuth completion.', storageError)
+    }
+
+    window.history.replaceState({}, document.title, window.location.pathname)
+    window.setTimeout(() => {
+      try {
+        window.close()
+      } catch {
+        // If the browser blocks auto-close, leave the popup on the final page.
+      }
+    }, 100)
+  }, [])
+
+
+  useEffect(() => {
+    currentSupabaseToken = supabaseToken
+  }, [supabaseToken])
 
   const userProfile = useMemo(() => {
     const metadata = user?.user_metadata || {}
@@ -679,7 +740,7 @@ function App() {
         `${API_BASE_URL}/ingestion/meetings/${encodeURIComponent(meetingId)}/start`,
         {
           method: 'POST',
-          headers: { Authorization: `Bearer ${graphToken}` },
+          headers: bearerHeaders(graphToken),
         },
       )
 
@@ -1088,6 +1149,9 @@ function App() {
       const { data, error } = await supabase.auth.getSession()
       if (error) console.error(error)
       setSession(data.session)
+      if (data.session?.provider_token) {
+        localStorage.setItem(GRAPH_TOKEN_STORAGE_KEY, data.session.provider_token)
+      }
     }
 
     fetchSession()
@@ -1102,6 +1166,16 @@ function App() {
         summaryRequestedRef.current = new Set()
         ingestionStartAttemptedRef.current = new Set()
         catalogBootstrapDoneRef.current = false
+        mcpAutoConnectRef.current = false
+        setShowOnboarding(false)
+      } else {
+        const completed = localStorage.getItem('meetvault-onboarding-completed') === 'true'
+        setShowOnboarding(!completed)
+      }
+      if (nextSession?.provider_token) {
+        localStorage.setItem(GRAPH_TOKEN_STORAGE_KEY, nextSession.provider_token)
+      } else if (!nextSession) {
+        localStorage.removeItem(GRAPH_TOKEN_STORAGE_KEY)
       }
       setSession(nextSession)
     })
@@ -1114,6 +1188,30 @@ function App() {
     loadMeetingChats()
     loadCatalog()
   }, [loadCatalog, loadMeetingChats, userId])
+
+  useEffect(() => {
+    const refreshMcpState = () => {
+      if (!session) return
+      void loadMeetingChats()
+      setCatalogLoading(true)
+      void (async () => {
+        try {
+          await syncCatalogRef.current?.({ silent: true })
+        } finally {
+          setCatalogLoading(false)
+        }
+      })()
+    }
+
+    const unsubscribeOAuth = subscribeMcpOAuthEvents(() => {
+      refreshMcpState()
+    })
+
+    return () => {
+      unsubscribeOAuth()
+    }
+  }, [session, loadMeetingChats])
+
 
   useEffect(() => {
     if (!graphToken || !userId) return undefined
@@ -1146,6 +1244,30 @@ function App() {
 
     return () => window.clearInterval(intervalId)
   }, [checkBackendHealth, graphToken, userId])
+
+  useEffect(() => {
+    if (!graphToken || !userId) return
+    if (mcpAutoConnectRef.current) return
+    mcpAutoConnectRef.current = true
+
+    const autoConnectMicrosoft = async () => {
+      const providerUserId = user?.email || 'Microsoft user'
+      const providers = ['outlook', 'calendar']
+
+      await Promise.all(
+        providers.map(async (provider) => {
+          try {
+            await mcpService.connectProvider(provider, providerUserId, graphToken, supabaseToken)
+            publishMcpOAuthEvent({ provider, connected: true, error: '' })
+          } catch (error) {
+            console.error(`Auto-connect for ${provider} failed:`, error)
+          }
+        }),
+      )
+    }
+
+    void autoConnectMicrosoft()
+  }, [graphToken, userId, supabaseToken, user?.email])
 
   pollIngestionRef.current = async () => {
     const targets = meetingChatsRef.current.filter((chat) =>
@@ -1257,6 +1379,20 @@ function App() {
           </button>
         </section>
       </main>
+    )
+  }
+
+  if (showOnboarding) {
+    return (
+      <OnboardingView
+        token={backendToken}
+        supabaseToken={supabaseToken}
+        userEmail={user?.email}
+        onComplete={() => {
+          localStorage.setItem('meetvault-onboarding-completed', 'true')
+          setShowOnboarding(false)
+        }}
+      />
     )
   }
 
@@ -1487,7 +1623,9 @@ function App() {
                     </article>
                   ))}
                 </div>
-                <MCPPanel token={backendToken} userEmail={user?.email} />
+                <div className="mcp-panel-shell">
+                  <MCPPanel token={backendToken} supabaseToken={supabaseToken} userEmail={user?.email} />
+                </div>
               </div>
             )}
           </section>

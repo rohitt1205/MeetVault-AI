@@ -1,3 +1,5 @@
+import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +11,8 @@ from app.mcp import connection_store
 from app.mcp.github import github_oauth
 from app.mcp.jira import jira_connector
 from app.mcp.mcp_manager import MCPManager
+from app.mcp.slack import slack_connector
+from app.mcp.salesforce import salesforce_connector
 
 
 class MCPTests(unittest.TestCase):
@@ -65,6 +69,59 @@ class MCPTests(unittest.TestCase):
 
         params = mock_get.call_args.kwargs["params"]
         self.assertIn("assignee = currentUser()", params["jql"])
+
+    @patch("app.mcp.connection_store.requests.get")
+    def test_database_connection_store(self, mock_get):
+        mock_get_response = Mock()
+        mock_get_response.status_code = 200
+        mock_get_response.json.return_value = [{
+            "connected": True,
+            "provider_user_id": "test-github-user",
+            "access_token": "gh-access-token",
+            "refresh_token": None,
+            "expires_at": None
+        }]
+        mock_get.return_value = mock_get_response
+
+        # Mock JWT header segment
+        fake_segment = base64.b64encode(json.dumps({"sub": "user-uuid-1234"}).encode()).decode()
+        fake_jwt = f"header.{fake_segment}.signature"
+
+        with patch("app.mcp.connection_store.SUPABASE_URL", "https://supabase.co"):
+            val = connection_store.MCPConnectionStore.get("github", "test-github-user", fake_jwt)
+            self.assertTrue(val["connected"])
+            self.assertEqual(val["username"], "test-github-user")
+            self.assertEqual(val["access_token"], "gh-access-token")
+
+    @patch("app.mcp.slack.slack_connector.requests.post")
+    def test_slack_connect(self, mock_post):
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_response.json.return_value = {
+            "ok": True,
+            "user": "slack-user",
+            "user_id": "U12345",
+            "team": "T12345"
+        }
+        mock_post.return_value = mock_response
+
+        res = slack_connector.verify_and_connect("fake-token")
+        self.assertTrue(res["connected"])
+        self.assertEqual(res["display_name"], "slack-user")
+
+    @patch("app.mcp.salesforce.salesforce_connector.requests.get")
+    def test_salesforce_connect(self, mock_get):
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_response.json.return_value = {
+            "name": "sf-user",
+            "email": "sf@example.com"
+        }
+        mock_get.return_value = mock_response
+
+        res = salesforce_connector.verify_and_connect("fake-token", "https://na1.salesforce.com")
+        self.assertTrue(res["connected"])
+        self.assertEqual(res["display_name"], "sf-user")
 
 
 if __name__ == "__main__":

@@ -392,10 +392,12 @@ MeetVault-AI/
 ## Environment Variables
 
 Use `.env.example` as the reference for required configuration.
+Microsoft sign-in is handled through Supabase Auth, so the Microsoft client ID and secret are configured in the Supabase Auth dashboard, not in the app env file. The backend only needs those Microsoft env values if you later switch to a separate direct Graph app registration flow.
 
 Important variables:
 
 ```env
+# Optional unless you later enable a separate backend Graph app registration
 MS_CLIENT_ID=
 MS_CLIENT_SECRET=
 MS_TENANT_ID=

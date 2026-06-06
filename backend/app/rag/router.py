@@ -4,8 +4,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import get_access_token
-from app.api.mcp_routes import get_user_key_from_header
-from app.rag.dummy_data import DUMMY_MEETING_TRANSCRIPT
+from app.api.mcp_routes import get_user_key_from_header, resolve_tokens
 from app.rag.ingest import ingest_transcript
 from app.rag.retrieve import retrieve_and_answer
 
@@ -37,34 +36,28 @@ def ingest_text(request: IngestRequest, authorization: str = Header(None)):
         raise HTTPException(status_code=500, detail="Ingest failed.") from exc
 
 
-@router.post("/ingest_dummy")
-def ingest_dummy_data(authorization: str = Header(None)):
-    """
-    Convenience endpoint for the hackathon to load dummy data quickly.
-    """
-    get_access_token(authorization)
-    try:
-        result = ingest_transcript(DUMMY_MEETING_TRANSCRIPT)
-        return {"message": "Dummy data ingested successfully", "details": result}
-    except Exception as exc:
-        logger.exception("RAG dummy ingest failed")
-        raise HTTPException(status_code=500, detail="Dummy ingest failed.") from exc
-
-
 @router.post("/query")
-def query_rag(request: QueryRequest, authorization: str = Header(None)):
+def query_rag(
+    request: QueryRequest,
+    authorization: str = Header(None),
+    x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
+):
     """
     Queries the RAG pipeline with a user question and returns the grounded answer.
     """
     get_access_token(authorization)
     try:
         user_key = get_user_key_from_header(authorization)
+        graph_jwt, supabase_jwt = resolve_tokens(authorization, x_supabase_token)
         result = retrieve_and_answer(
             request.query,
             meeting_id=request.meeting_id,
             user_key=user_key,
+            graph_jwt=graph_jwt,
+            supabase_jwt=supabase_jwt,
         )
         return result
     except Exception as exc:
         logger.exception("RAG query failed")
         raise HTTPException(status_code=500, detail="Query failed.") from exc
+
