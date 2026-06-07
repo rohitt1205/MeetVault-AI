@@ -2189,6 +2189,49 @@
   padding-top: 8px;
 }
 
+.answer-presentation-stack {
+  display: grid;
+  gap: 0;
+}
+
+.answer-sources-footer {
+  margin-top: 10px;
+  padding-top: 10px;
+}
+
+.answer-sources-footer summary {
+  color: #176b5f;
+}
+
+.source-proof-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.source-speaker {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.source-topic {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(23, 107, 95, 0.12);
+  color: #176b5f;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.source-meeting {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .source-details summary {
   cursor: pointer;
   color: #176b5f;

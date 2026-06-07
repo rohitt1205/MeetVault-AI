@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import ChatMarkdown from './ChatMarkdown'
+import AnswerSourcesFooter from './AnswerSourcesFooter'
 import {
   DEFAULT_OUTPUT_FORMAT,
   DEFAULT_RAW_VIEW_MODE,
@@ -12,6 +13,7 @@ import {
   resolveInsightCanvasView,
   shouldShowFormatKicker,
 } from '../utils/answerFormatting'
+import { shouldShowAnswerSources } from '../utils/meetingChat'
 
 const CopyAnswerButton = ({ text }) => {
   const [copied, setCopied] = useState(false)
@@ -47,6 +49,7 @@ export default function AnswerPresentation({
   format = DEFAULT_OUTPUT_FORMAT,
   rawViewMode = DEFAULT_RAW_VIEW_MODE,
   sourceCount,
+  sources = [],
   showCopy = true,
   showKicker = true,
 }) {
@@ -63,9 +66,14 @@ export default function AnswerPresentation({
 
   const kickerVisible = showKicker && shouldShowFormatKicker(normalizedFormat, mode)
   const toolbar = showCopy ? <CopyAnswerButton text={text} /> : null
+  const showSourcesFooter = shouldShowAnswerSources(mode, sources)
+  const resolvedSourceCount =
+    typeof sourceCount === 'number' ? sourceCount : sources.length
+
+  let presentation = null
 
   if (parsed.useSimpleLayout) {
-    return (
+    presentation = (
       <div className="answer-presentation answer-simple">
         {toolbar}
         <div className="answer-simple-body">
@@ -73,12 +81,10 @@ export default function AnswerPresentation({
         </div>
       </div>
     )
-  }
-
-  if (normalizedFormat === 'raw') {
+  } else if (normalizedFormat === 'raw') {
     const resolvedRawView = normalizeRawViewMode(rawViewMode)
 
-    return (
+    presentation = (
       <div className="answer-presentation answer-raw-wrap">
         {toolbar}
         {resolvedRawView === 'markdown' ? (
@@ -90,12 +96,10 @@ export default function AnswerPresentation({
         )}
       </div>
     )
-  }
-
-  if (normalizedFormat === 'bullets') {
+  } else if (normalizedFormat === 'bullets') {
     const items = parsed.bullets.length ? parsed.bullets : [parsed.highlight]
 
-    return (
+    presentation = (
       <div className="answer-presentation answer-bullet-brief">
         <div className="answer-format-head">
           <div>
@@ -111,12 +115,10 @@ export default function AnswerPresentation({
         </ul>
       </div>
     )
-  }
-
-  if (normalizedFormat === 'insight_canvas') {
+  } else if (normalizedFormat === 'insight_canvas') {
     const sectionItemLimit = 8
 
-    return (
+    presentation = (
       <article className="answer-presentation answer-insight-canvas" aria-label={canvasView.title}>
         <div className="canvas-grid" aria-hidden="true" />
         <div className="canvas-content">
@@ -126,8 +128,8 @@ export default function AnswerPresentation({
               <h3>{canvasView.title}</h3>
             </div>
             <div className="canvas-meta">
-              {typeof sourceCount === 'number' && sourceCount > 0 ? (
-                <span className="canvas-source-badge">{sourceCount} sources</span>
+              {resolvedSourceCount > 0 ? (
+                <span className="canvas-source-badge">{resolvedSourceCount} sources</span>
               ) : null}
               {toolbar}
             </div>
@@ -155,19 +157,26 @@ export default function AnswerPresentation({
         </div>
       </article>
     )
+  } else {
+    presentation = (
+      <article className="answer-presentation answer-visual-card">
+        <div className="answer-card-top">
+          <div>
+            <strong className="answer-card-title">{parsed.title}</strong>
+          </div>
+          {toolbar}
+        </div>
+        <div className="answer-card-body">
+          <ChatMarkdown text={parsed.body} />
+        </div>
+      </article>
+    )
   }
 
   return (
-    <article className="answer-presentation answer-visual-card">
-      <div className="answer-card-top">
-        <div>
-          <strong className="answer-card-title">{parsed.title}</strong>
-        </div>
-        {toolbar}
-      </div>
-      <div className="answer-card-body">
-        <ChatMarkdown text={parsed.body} />
-      </div>
-    </article>
+    <div className="answer-presentation-stack">
+      {presentation}
+      {showSourcesFooter ? <AnswerSourcesFooter sources={sources} /> : null}
+    </div>
   )
 }
