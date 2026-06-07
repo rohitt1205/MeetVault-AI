@@ -1,14 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import MCPPanel from './components/mcp/MCPPanel'
+import FormatPreview from './components/FormatPreview'
 import MeetingsGridView from './views/MeetingsGridView'
 import MeetingChatView from './views/MeetingChatView'
 import WorkspaceLanding from './views/WorkspaceLanding'
 import {
   DEFAULT_OUTPUT_FORMAT,
+  DEFAULT_RAW_VIEW_MODE,
   OUTPUT_FORMATS,
+  RAW_VIEW_MODES,
+  getOutputFormatMeta,
   isValidOutputFormat,
+  isValidRawViewMode,
+  normalizeOutputFormat,
+  normalizeRawViewMode,
   outputPreferenceStorageKey,
+  rawViewStorageKey,
 } from './utils/outputPreferences'
 import {
   CHAT_HISTORY_TABLE,
@@ -40,6 +48,43 @@ const titleFromQuery = (value) => {
   const words = (value || '').trim().split(/\s+/).filter(Boolean)
   if (words.length === 0) return 'Workspace chat'
   return words.slice(0, 6).join(' ')
+}
+
+const normalizeChatTitle = (value) =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+
+const chatTitleMatchesIndex = (chatTitle, indexedTitle) => {
+  const left = normalizeChatTitle(chatTitle)
+  const right = normalizeChatTitle(indexedTitle)
+  if (!left || !right) return true
+  if (left === right || left.includes(right) || right.includes(left)) return true
+
+  const leftWords = left.split(/\s+/).filter((word) => word.length > 2)
+  const rightWords = new Set(right.split(/\s+/).filter((word) => word.length > 2))
+  if (!leftWords.length || !rightWords.size) return false
+
+  const overlap = leftWords.filter((word) => rightWords.has(word)).length
+  return overlap >= Math.min(2, leftWords.length)
+}
+
+const isStaleMeetingChat = (row, ingestion) => {
+  if (!row || ingestion?.status === 'EMBEDDED') {
+    if (ingestion?.status === 'EMBEDDED') {
+      const indexedTitle = ingestion.indexed_meeting_title
+      const chatTitle = row.title || row.meetingTitle
+      return indexedTitle && !chatTitleMatchesIndex(chatTitle, indexedTitle)
+    }
+    return false
+  }
+
+  if (row.status === 'ready' && (row.messages || []).length > 0) {
+    return true
+  }
+
+  return false
 }
 
 const mcpServers = [
@@ -148,6 +193,8 @@ function App() {
   const [settingsView, setSettingsView] = useState('appearance')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || 'light')
   const [outputPreference, setOutputPreference] = useState('')
+  const [previewFormat, setPreviewFormat] = useState(DEFAULT_OUTPUT_FORMAT)
+  const [rawViewMode, setRawViewMode] = useState(DEFAULT_RAW_VIEW_MODE)
   const [hasPreferenceLoaded, setHasPreferenceLoaded] = useState(false)
   const [isPreferenceLoading, setIsPreferenceLoading] = useState(false)
   const [preferenceSaving, setPreferenceSaving] = useState(false)
@@ -179,6 +226,7 @@ function App() {
   const catalogSyncInFlightRef = useRef(false)
   const catalogBootstrapDoneRef = useRef(false)
   const syncCatalogRef = useRef(null)
+  const loadMeetingChatsRef = useRef(null)
   const lastBackendWarnAtRef = useRef(0)
   const autoSyncRegisteredTokenRef = useRef('')
 
@@ -227,6 +275,7 @@ function App() {
       setPreferenceSaving(true)
       setPreferenceError('')
       setOutputPreference(nextFormat)
+      setPreviewFormat(nextFormat)
 
       if (userId) {
         localStorage.setItem(outputPreferenceStorageKey(userId), nextFormat)
@@ -240,6 +289,7 @@ function App() {
               {
                 user_id: userId,
                 output_format: nextFormat,
+                raw_view_mode: rawViewMode,
                 updated_at: new Date().toISOString(),
               },
               { onConflict: 'user_id' },
@@ -250,14 +300,65 @@ function App() {
       } catch (error) {
         console.error('Output preference save failed:', error)
         setPreferenceError(
-          'Saved on this device. Run supabase/migrations/005_user_preferences.sql to sync it to Supabase.',
+          'Saved on this device. Run supabase migrations 005–006 if cloud sync fails.',
         )
       } finally {
         setHasPreferenceLoaded(true)
         setPreferenceSaving(false)
       }
     },
-    [userId],
+    [rawViewMode, userId],
+  )
+
+  const saveRawViewMode = useCallback(
+    async (mode) => {
+      const nextMode = isValidRawViewMode(mode) ? mode : DEFAULT_RAW_VIEW_MODE
+      setPreferenceSaving(true)
+      setPreferenceError('')
+      setRawViewMode(nextMode)
+
+      if (userId) {
+        localStorage.setItem(rawViewStorageKey(userId), nextMode)
+      }
+
+      try {
+        if (userId && outputPreference) {
+          const { error } = await supabase
+            .from('user_preferences')
+            .upsert(
+              {
+                user_id: userId,
+                output_format: outputPreference,
+                raw_view_mode: nextMode,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'user_id' },
+            )
+
+          if (error) throw error
+        }
+      } catch (error) {
+        console.error('Raw view preference save failed:', error)
+        setPreferenceError('Raw view saved locally. Run migration 006 for Supabase sync.')
+      } finally {
+        setPreferenceSaving(false)
+      }
+    },
+    [outputPreference, userId],
+  )
+
+  const buildAssistantMessage = useCallback(
+    (payload, answerText) => ({
+      id: `assistant-${crypto.randomUUID()}`,
+      role: 'assistant',
+      text: answerText,
+      mode: payload.answer_mode || 'rag_answer',
+      outputFormat: normalizeOutputFormat(payload.output_format || outputPreference),
+      rawViewMode,
+      sourceCount: (payload.sources || payload.results || []).length,
+      createdAt: new Date().toISOString(),
+    }),
+    [outputPreference, rawViewMode],
   )
 
   useEffect(() => {
@@ -267,7 +368,9 @@ function App() {
 
     let cancelled = false
     const storageKey = outputPreferenceStorageKey(userId)
+    const rawStorageKey = rawViewStorageKey(userId)
     const localFormat = localStorage.getItem(storageKey)
+    const localRawView = localStorage.getItem(rawStorageKey)
 
     const loadPreference = async () => {
       setIsPreferenceLoading(true)
@@ -277,27 +380,39 @@ function App() {
       try {
         const { data, error } = await supabase
           .from('user_preferences')
-          .select('output_format')
+          .select('output_format, raw_view_mode')
           .eq('user_id', userId)
           .maybeSingle()
 
         if (cancelled) return
         if (error) throw error
 
+        if (isValidRawViewMode(data?.raw_view_mode)) {
+          setRawViewMode(data.raw_view_mode)
+          localStorage.setItem(rawStorageKey, data.raw_view_mode)
+        } else if (isValidRawViewMode(localRawView)) {
+          setRawViewMode(localRawView)
+        }
+
         if (isValidOutputFormat(data?.output_format)) {
           setOutputPreference(data.output_format)
+          setPreviewFormat(data.output_format)
           localStorage.setItem(storageKey, data.output_format)
           return
         }
 
         if (isValidOutputFormat(localFormat)) {
           setOutputPreference(localFormat)
+          setPreviewFormat(localFormat)
           const { error: syncError } = await supabase
             .from('user_preferences')
             .upsert(
               {
                 user_id: userId,
                 output_format: localFormat,
+                raw_view_mode: isValidRawViewMode(localRawView)
+                  ? localRawView
+                  : DEFAULT_RAW_VIEW_MODE,
                 updated_at: new Date().toISOString(),
               },
               { onConflict: 'user_id' },
@@ -311,16 +426,22 @@ function App() {
         }
 
         setOutputPreference('')
+        setPreviewFormat(DEFAULT_OUTPUT_FORMAT)
       } catch (error) {
         if (cancelled) return
         console.error('Output preference load failed:', error)
         if (isValidOutputFormat(localFormat)) {
           setOutputPreference(localFormat)
+          setPreviewFormat(localFormat)
         } else {
           setOutputPreference('')
+          setPreviewFormat(DEFAULT_OUTPUT_FORMAT)
+        }
+        if (isValidRawViewMode(localRawView)) {
+          setRawViewMode(localRawView)
         }
         setPreferenceError(
-          'Preference is stored locally until the Supabase preferences migration is applied.',
+          'Preference is stored locally until Supabase migrations 005–006 are applied.',
         )
       } finally {
         if (!cancelled) {
@@ -486,19 +607,43 @@ function App() {
             }
           }),
         )
-        rows = rows
-          .map((row, index) => {
-            const ingestion = statusChecks[index]
-            if (ingestion?.status === 'EMBEDDED') return { ...row, status: 'ready' }
-            if (['QUEUED', 'PROCESSING'].includes(ingestion?.status)) {
-              return { ...row, status: 'preparing' }
+
+        const reconciledRows = []
+        for (let index = 0; index < rows.length; index += 1) {
+          const row = rows[index]
+          const ingestion = statusChecks[index]
+
+          if (isStaleMeetingChat(row, ingestion)) {
+            const { error: updateError } = await supabase
+              .from(CHAT_HISTORY_TABLE)
+              .update({ status: 'failed', messages: [] })
+              .eq('id', row.id)
+              .eq('user_id', userId)
+
+            if (!updateError) {
+              summaryRequestedRef.current.delete(row.id)
+              summarySkippedRef.current.delete(row.id)
             }
-            if (['FAILED', 'NO_TRANSCRIPT'].includes(ingestion?.status)) {
-              return { ...row, status: 'failed' }
-            }
-            return row
-          })
-          .filter((row) => row.status !== 'failed')
+            reconciledRows.push({ ...row, status: 'failed', messages: [] })
+            continue
+          }
+
+          if (ingestion?.status === 'EMBEDDED') {
+            reconciledRows.push({ ...row, status: 'ready' })
+            continue
+          }
+          if (['QUEUED', 'PROCESSING'].includes(ingestion?.status)) {
+            reconciledRows.push({ ...row, status: 'preparing' })
+            continue
+          }
+          if (['FAILED', 'NO_TRANSCRIPT'].includes(ingestion?.status)) {
+            reconciledRows.push({ ...row, status: 'failed' })
+            continue
+          }
+          reconciledRows.push(row)
+        }
+
+        rows = reconciledRows.filter((row) => row.status !== 'failed')
       }
       setMeetingChats(rows)
       setActiveChatId((current) =>
@@ -508,6 +653,8 @@ function App() {
 
     setIsHistoryLoading(false)
   }, [userId])
+
+  loadMeetingChatsRef.current = loadMeetingChats
 
   const upsertMeetingChat = useCallback(
     async ({ meetingId, title, status, messages }) => {
@@ -877,11 +1024,13 @@ function App() {
 
         if (payload.sync_status === 'FAILED' && payload.sync_error && !silent) {
           setCatalogError(payload.sync_error)
+          await loadMeetingChatsRef.current?.()
           return payload
         }
 
         if (payload.sync_error && !silent) {
           setCatalogError(payload.sync_error)
+          await loadMeetingChatsRef.current?.()
           return payload
         }
 
@@ -942,6 +1091,7 @@ function App() {
           setCatalogError(message)
         }
 
+        await loadMeetingChatsRef.current?.()
         return payload
       } catch (error) {
         const isNetworkError = isNetworkFetchError(error)
@@ -1016,6 +1166,7 @@ function App() {
           body: JSON.stringify({
             query: SUMMARY_PROMPT,
             meeting_id: chat.meetingId,
+            output_format: outputPreference,
           }),
         })
 
@@ -1030,12 +1181,9 @@ function App() {
             : 'Summary is not available yet.'
 
         const summaryMessage = {
+          ...buildAssistantMessage(payload, text),
           id: `summary-${crypto.randomUUID()}`,
-          role: 'assistant',
-          text,
           mode: payload.answer_mode || 'extractive_summary',
-          sourceCount: (payload.sources || []).length,
-          createdAt: new Date().toISOString(),
         }
 
         const nextMessages = [...(chat.messages || []), summaryMessage]
@@ -1051,7 +1199,7 @@ function App() {
         }
       }
     },
-    [persistChat],
+    [buildAssistantMessage, outputPreference, persistChat],
   )
 
   const markChatReady = useCallback(
@@ -1346,6 +1494,7 @@ function App() {
           body: JSON.stringify({
             query: trimmedQuery,
             meeting_id: meetingId,
+            output_format: outputPreference,
           }),
         })
 
@@ -1359,13 +1508,7 @@ function App() {
             ? payload.answer.trim()
             : 'No grounded answer is available for this meeting yet.'
 
-        const assistantMessage = {
-          id: `assistant-${crypto.randomUUID()}`,
-          role: 'assistant',
-          text: answerText,
-          mode: payload.answer_mode || 'rag_answer',
-          createdAt: new Date().toISOString(),
-        }
+        const assistantMessage = buildAssistantMessage(payload, answerText)
 
         const nextMessages = [...optimisticMessages, assistantMessage]
         await persistChat(chatId, {
@@ -1394,7 +1537,7 @@ function App() {
         setIsSearching(false)
       }
     },
-    [activeChat, activeIngestion?.status, persistChat, query],
+    [activeChat, activeIngestion?.status, buildAssistantMessage, outputPreference, persistChat, query],
   )
 
   const handleWorkspaceSearch = useCallback(
@@ -1455,6 +1598,7 @@ function App() {
           headers: bearerHeaders(token, { 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             query: trimmedQuery,
+            output_format: outputPreference,
           }),
         })
 
@@ -1468,13 +1612,7 @@ function App() {
             ? payload.answer.trim()
             : 'No grounded answer is available from indexed recordings yet.'
 
-        const assistantMessage = {
-          id: `assistant-${crypto.randomUUID()}`,
-          role: 'assistant',
-          text: answerText,
-          mode: payload.answer_mode || 'rag_answer',
-          createdAt: new Date().toISOString(),
-        }
+        const assistantMessage = buildAssistantMessage(payload, answerText)
 
         const nextMessages = [...optimisticMessages, assistantMessage]
         await persistWorkspaceChat(chat.id, {
@@ -1500,7 +1638,7 @@ function App() {
         setIsSearching(false)
       }
     },
-    [activeWorkspaceChat, createWorkspaceChat, persistWorkspaceChat, query],
+    [activeWorkspaceChat, buildAssistantMessage, createWorkspaceChat, outputPreference, persistWorkspaceChat, query],
   )
 
   useEffect(() => {
@@ -1702,6 +1840,8 @@ function App() {
   }
 
   if (!outputPreference) {
+    const previewMeta = getOutputFormatMeta(previewFormat)
+
     return (
       <main className="login-gate preference-gate">
         <section className="login-card preference-card" aria-labelledby="preference-title">
@@ -1714,24 +1854,55 @@ function App() {
           </div>
           <div className="preference-copy">
             <p>
-              Pick how MeetVault should present answers from indexed meeting knowledge. You can
-              change this later in Settings.
+              Pick how MeetVault presents grounded answers from your meeting recordings. Hover a
+              style to preview it, then continue into the workspace.
             </p>
           </div>
-          <div className="preference-grid" role="group" aria-label="Answer style choices">
-            {OUTPUT_FORMATS.map((format) => (
-              <button
-                className="preference-option"
-                key={format.id}
-                type="button"
-                disabled={preferenceSaving}
-                onClick={() => saveOutputPreference(format.id)}
-              >
-                <span>{format.label}</span>
-                <small>{format.description}</small>
-              </button>
-            ))}
+          <div className="preference-layout">
+            <div className="preference-grid" role="group" aria-label="Answer style choices">
+              {OUTPUT_FORMATS.map((format) => (
+                <button
+                  className={
+                    previewFormat === format.id
+                      ? 'preference-option active'
+                      : 'preference-option'
+                  }
+                  key={format.id}
+                  type="button"
+                  disabled={preferenceSaving}
+                  onMouseEnter={() => setPreviewFormat(format.id)}
+                  onFocus={() => setPreviewFormat(format.id)}
+                  onClick={() => setPreviewFormat(format.id)}
+                >
+                  <span>{format.label}</span>
+                  <small>{format.description}</small>
+                </button>
+              ))}
+            </div>
+            {previewFormat === 'raw' ? (
+              <div className="raw-view-toggle" role="group" aria-label="Raw display mode">
+                {RAW_VIEW_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    className={rawViewMode === mode.id ? 'raw-view-option active' : 'raw-view-option'}
+                    onClick={() => setRawViewMode(mode.id)}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <FormatPreview format={previewFormat} rawViewMode={rawViewMode} />
           </div>
+          <button
+            className="auth-button preference-continue"
+            type="button"
+            disabled={preferenceSaving}
+            onClick={() => saveOutputPreference(previewFormat)}
+          >
+            {preferenceSaving ? 'Saving…' : `Continue with ${previewMeta.label}`}
+          </button>
           {preferenceError ? <p className="feedback error">{preferenceError}</p> : null}
         </section>
       </main>
@@ -1927,6 +2098,7 @@ function App() {
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
               outputPreference={outputPreference}
+              rawViewMode={rawViewMode}
               canClearChat={
                 isChatReady(activeChat.status, activeIngestion?.status) &&
                 (activeChat.messages || []).length > 0 &&
@@ -1953,6 +2125,7 @@ function App() {
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
               outputPreference={outputPreference}
+              rawViewMode={rawViewMode}
               onQueryChange={setQuery}
               onSubmit={handleWorkspaceSearch}
               onRefreshAutoSync={fetchAutoSyncStatus}
@@ -2039,6 +2212,8 @@ function App() {
                         key={format.id}
                         type="button"
                         disabled={preferenceSaving}
+                        onMouseEnter={() => setPreviewFormat(format.id)}
+                        onFocus={() => setPreviewFormat(format.id)}
                         onClick={() => saveOutputPreference(format.id)}
                       >
                         <span>{format.label}</span>
@@ -2046,6 +2221,32 @@ function App() {
                       </button>
                     ))}
                   </div>
+                  {(previewFormat === 'raw' || outputPreference === 'raw') ? (
+                    <div className="settings-section">
+                      <p className="eyebrow">Raw display</p>
+                      <div className="raw-view-toggle compact" role="group" aria-label="Raw display mode">
+                        {RAW_VIEW_MODES.map((mode) => (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            className={
+                              rawViewMode === mode.id ? 'raw-view-option active' : 'raw-view-option'
+                            }
+                            disabled={preferenceSaving}
+                            onClick={() => saveRawViewMode(mode.id)}
+                          >
+                            <span>{mode.label}</span>
+                            <small>{mode.description}</small>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <FormatPreview
+                    format={previewFormat || outputPreference}
+                    rawViewMode={rawViewMode}
+                    compact
+                  />
                   {preferenceError ? <p className="feedback error">{preferenceError}</p> : null}
                 </div>
               </div>

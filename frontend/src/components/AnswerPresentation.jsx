@@ -1,84 +1,111 @@
+import { useMemo, useState } from 'react'
 import ChatMarkdown from './ChatMarkdown'
-import { DEFAULT_OUTPUT_FORMAT, getOutputFormatMeta, normalizeOutputFormat } from '../utils/outputPreferences'
+import {
+  DEFAULT_OUTPUT_FORMAT,
+  DEFAULT_RAW_VIEW_MODE,
+  getOutputFormatMeta,
+  normalizeOutputFormat,
+  normalizeRawViewMode,
+} from '../utils/outputPreferences'
+import {
+  parseAnswerContent,
+  resolveInsightCanvasView,
+  shouldShowFormatKicker,
+} from '../utils/answerFormatting'
 
-const stripMarkdown = (text) =>
-  (text || '')
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/[#*_`>]/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
+const CopyAnswerButton = ({ text }) => {
+  const [copied, setCopied] = useState(false)
 
-const splitSentences = (text) => {
-  const normalized = stripMarkdown(text)
-  if (!normalized) return []
+  const handleCopy = async () => {
+    const value = (text || '').trim()
+    if (!value) return
 
-  return normalized
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean)
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 1800)
+    } catch {
+      setCopied(false)
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="copy-answer-button"
+      onClick={handleCopy}
+      aria-label={copied ? 'Copied answer' : 'Copy answer'}
+    >
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  )
 }
 
-const extractListItems = (text) =>
-  (text || '')
-    .split('\n')
-    .map((line) => line.trim())
-    .map((line) => {
-      const bullet = line.match(/^[-*•]\s+(.+)/)
-      if (bullet) return bullet[1].trim()
-
-      const ordered = line.match(/^\d+\.\s+(.+)/)
-      if (ordered) return ordered[1].trim()
-
-      return ''
-    })
-    .filter(Boolean)
-
-const buildBulletPoints = (text, limit = 6) => {
-  const explicitItems = extractListItems(text)
-  const sourceItems = explicitItems.length ? explicitItems : splitSentences(text)
-  return sourceItems.slice(0, limit)
-}
-
-const buildTitle = (text, fallback) => {
-  const firstLine = (text || '')
-    .split('\n')
-    .map((line) => stripMarkdown(line))
-    .find(Boolean)
-
-  const title = firstLine || fallback || 'Meeting answer'
-  if (title.length <= 76) return title
-  return `${title.slice(0, 73).trim()}...`
-}
-
-const buildHighlight = (text) => {
-  const sentences = splitSentences(text)
-  return sentences[0] || stripMarkdown(text) || 'No answer text available yet.'
-}
-
-export default function AnswerPresentation({ text, mode, format = DEFAULT_OUTPUT_FORMAT }) {
+export default function AnswerPresentation({
+  text,
+  mode,
+  format = DEFAULT_OUTPUT_FORMAT,
+  rawViewMode = DEFAULT_RAW_VIEW_MODE,
+  sourceCount,
+  showCopy = true,
+  showKicker = true,
+}) {
   const normalizedFormat = normalizeOutputFormat(format)
   const meta = getOutputFormatMeta(normalizedFormat)
-  const title = buildTitle(text, meta?.label)
-  const bullets = buildBulletPoints(text)
-  const highlight = buildHighlight(text)
+  const parsed = useMemo(
+    () => parseAnswerContent(text, mode, meta?.label || 'Meeting answer'),
+    [text, mode, meta?.label],
+  )
+  const canvasView = useMemo(
+    () => resolveInsightCanvasView(parsed, meta?.label || 'Meeting summary'),
+    [parsed, meta?.label],
+  )
+
+  const kickerVisible = showKicker && shouldShowFormatKicker(normalizedFormat, mode)
+  const toolbar = showCopy ? <CopyAnswerButton text={text} /> : null
+
+  if (parsed.useSimpleLayout) {
+    return (
+      <div className="answer-presentation answer-simple">
+        {toolbar}
+        <div className="answer-simple-body">
+          <ChatMarkdown text={text} />
+        </div>
+      </div>
+    )
+  }
 
   if (normalizedFormat === 'raw') {
+    const resolvedRawView = normalizeRawViewMode(rawViewMode)
+
     return (
-      <pre className="answer-presentation answer-raw-output">
-        {text || 'No answer text available yet.'}
-      </pre>
+      <div className="answer-presentation answer-raw-wrap">
+        {toolbar}
+        {resolvedRawView === 'markdown' ? (
+          <div className="answer-raw-markdown">
+            <ChatMarkdown text={text || 'No answer text available yet.'} />
+          </div>
+        ) : (
+          <pre className="answer-raw-output">{text || 'No answer text available yet.'}</pre>
+        )}
+      </div>
     )
   }
 
   if (normalizedFormat === 'bullets') {
+    const items = parsed.bullets.length ? parsed.bullets : [parsed.highlight]
+
     return (
       <div className="answer-presentation answer-bullet-brief">
         <div className="answer-format-head">
-          <span>{meta.shortLabel}</span>
-          <strong>{title}</strong>
+          <div>
+            {kickerVisible ? <span>{meta.shortLabel}</span> : null}
+            <strong>{parsed.title}</strong>
+          </div>
+          {toolbar}
         </div>
         <ul>
-          {(bullets.length ? bullets : [highlight]).map((item, index) => (
+          {items.map((item, index) => (
             <li key={`${mode || 'answer'}-${index}`}>{item}</li>
           ))}
         </ul>
@@ -87,18 +114,44 @@ export default function AnswerPresentation({ text, mode, format = DEFAULT_OUTPUT
   }
 
   if (normalizedFormat === 'insight_canvas') {
+    const sectionItemLimit = 8
+
     return (
-      <article className="answer-presentation answer-insight-canvas" aria-label={title}>
+      <article className="answer-presentation answer-insight-canvas" aria-label={canvasView.title}>
         <div className="canvas-grid" aria-hidden="true" />
         <div className="canvas-content">
-          <span className="canvas-kicker">{meta.shortLabel}</span>
-          <h3>{title}</h3>
-          <p>{highlight}</p>
-          <div className="canvas-pill-row" aria-label="Key points">
-            {(bullets.length ? bullets.slice(0, 3) : [highlight]).map((item, index) => (
-              <span key={`${mode || 'canvas'}-${index}`}>{item}</span>
-            ))}
+          <div className="canvas-top-row">
+            <div>
+              {kickerVisible ? <span className="canvas-kicker">{meta.shortLabel}</span> : null}
+              <h3>{canvasView.title}</h3>
+            </div>
+            <div className="canvas-meta">
+              {typeof sourceCount === 'number' && sourceCount > 0 ? (
+                <span className="canvas-source-badge">{sourceCount} sources</span>
+              ) : null}
+              {toolbar}
+            </div>
           </div>
+          {canvasView.showLead ? <p className="canvas-lead">{parsed.highlight}</p> : null}
+          {canvasView.showSections ? (
+            <div className="canvas-section-grid">
+              {canvasView.sections.map((section) => (
+                <div className="canvas-section" key={section.id}>
+                  <span>{section.label}</span>
+                  <ul>
+                    {section.items.slice(0, sectionItemLimit).map((item, index) => (
+                      <li key={`${section.id}-${index}`}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {canvasView.showBody ? (
+            <div className="canvas-full-body">
+              <ChatMarkdown text={canvasView.body} />
+            </div>
+          ) : null}
         </div>
       </article>
     )
@@ -108,12 +161,12 @@ export default function AnswerPresentation({ text, mode, format = DEFAULT_OUTPUT
     <article className="answer-presentation answer-visual-card">
       <div className="answer-card-top">
         <div>
-          <span>{meta.shortLabel}</span>
-          <h3>{title}</h3>
+          <strong className="answer-card-title">{parsed.title}</strong>
         </div>
+        {toolbar}
       </div>
       <div className="answer-card-body">
-        <ChatMarkdown text={text} />
+        <ChatMarkdown text={parsed.body} />
       </div>
     </article>
   )

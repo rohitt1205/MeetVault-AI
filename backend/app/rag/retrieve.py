@@ -2,7 +2,7 @@ import re
 
 from app.mcp.mcp_manager import MCPManager
 from app.rag.llm import generate_answer, generate_conversational_answer
-from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT
+from app.rag.prompts import CONVERSATIONAL_PROMPT, build_rag_prompt, normalize_output_format
 from app.services.answer_service import AnswerService
 from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
@@ -212,12 +212,28 @@ def _topic_hint_from_sources(sources: list[dict]) -> str:
     return AnswerService._truncate_excerpt(text, limit=220)
 
 
+TIMESTAMP_PATTERN = re.compile(r"\b\d{1,2}:\d{2}(:\d{2})?(?:\.\d{1,3})?\b")
+SPEAKER_LINE_PATTERN = re.compile(r"(?m)^\s*[\w\s.'-]{1,48}:\s+\S")
+
+
 def _looks_like_transcript_dump(answer: str) -> bool:
+    """Detect pasted transcript text, not structured summaries or bullet answers."""
     normalized = (answer or "").strip()
-    if len(normalized) > 700:
+    if len(normalized) < 600:
+        return False
+
+    timestamp_count = len(TIMESTAMP_PATTERN.findall(normalized))
+    speaker_lines = len(SPEAKER_LINE_PATTERN.findall(normalized))
+
+    if timestamp_count >= 3:
         return True
-    if normalized.count("\n- ") >= 2 and len(normalized) > 400:
+    if speaker_lines >= 5:
         return True
+
+    # Long unstructured wall without markdown structure
+    if len(normalized) > 2800 and normalized.count("\n") < 4:
+        return True
+
     return False
 
 
@@ -289,17 +305,20 @@ def retrieve_and_answer(
     user_query: str,
     meeting_id: str | None = None,
     user_key: str = "demo",
+    output_format: str | None = None,
 ) -> dict:
     """
     Retrieves relevant transcript chunks from ChromaDB and generates a grounded answer.
     """
+    resolved_format = normalize_output_format(output_format)
+    is_summary = AnswerService.has_summary_intent(user_query)
     query_embedding = EmbeddingService.generate_query_embedding(user_query)
 
     results = ChromaService.query_embeddings(
         query_embedding,
         meeting_id=meeting_id,
-        n_results=5,
-        candidate_pool_size=80,
+        n_results=8 if is_summary else 5,
+        candidate_pool_size=120 if is_summary else 80,
         allowed_source_types=QUERYABLE_SOURCE_TYPES,
     )
 
@@ -329,6 +348,7 @@ def retrieve_and_answer(
     sources = _rank_sources(
         user_query,
         [source for source in candidate_sources if _is_queryable_source(source)],
+        limit=8 if is_summary else 5,
     )
 
     jira_context, sources = _append_jira_context(user_query, user_key, sources)
@@ -354,15 +374,17 @@ def retrieve_and_answer(
     )
     context_text = f"{context_text}{jira_context}".strip()
 
-    safe_query = user_query.replace("{", "{{").replace("}", "}}")
-    final_prompt = RAG_SYSTEM_PROMPT.format(
-        context=context_text,
-        query=safe_query,
-    )
+    final_prompt = build_rag_prompt(context_text, user_query, resolved_format)
+    num_predict = 1536 if is_summary else 768
 
     llm_error = None
     try:
-        answer = generate_answer(final_prompt, query=user_query, context=context_text)
+        answer = generate_answer(
+            final_prompt,
+            query=user_query,
+            context=context_text,
+            num_predict=num_predict,
+        )
         answer_mode = "rag_answer"
     except Exception as exc:
         llm_error = str(exc)
@@ -377,7 +399,11 @@ def retrieve_and_answer(
             )
             answer_mode = "retrieval_only"
 
-    if _is_not_found_answer(answer) or _looks_like_transcript_dump(answer):
+    should_use_extractive_fallback = _is_not_found_answer(answer) or (
+        _looks_like_transcript_dump(answer) and not is_summary
+    )
+
+    if should_use_extractive_fallback:
         if AnswerService.is_vague_or_social_query(user_query):
             return _generate_conversational_response(user_query, sources)
 
@@ -397,6 +423,7 @@ def retrieve_and_answer(
         "query": user_query,
         "answer": answer,
         "answer_mode": answer_mode,
+        "output_format": resolved_format,
         "llm_error": llm_error,
         "sources": sources,
     }

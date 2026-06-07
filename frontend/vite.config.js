@@ -3,6 +3,8 @@ import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Load VITE_* from repo-root .env (same file as backend local setup).
+  envDir: '..',
   plugins: [react()],
   server: {
     proxy: {

@@ -102,6 +102,12 @@ class MeetingCatalogService:
         )
         recording_event_ids.update(matched_calendar_ids)
 
+        revalidation = MeetingCatalogService.revalidate_stale_indices(
+            meetings=meetings,
+            recording_event_ids=recording_event_ids,
+            matched_onedrive_files=matched_videos,
+        )
+
         teams_diagnostics = dict(teams_source.get("diagnostics") or {})
         onedrive_diagnostics = dict(onedrive_source.get("diagnostics") or {})
         discovery_diagnostics = {
@@ -114,6 +120,7 @@ class MeetingCatalogService:
                 "meetings_with_graph_recording_or_transcript",
                 len(teams_source.get("recording_event_ids") or []),
             ),
+            **revalidation,
         }
 
         MeetingCatalogService._onedrive_items_by_event_id = {}
@@ -184,6 +191,63 @@ class MeetingCatalogService:
                 "sync_status": "FAILED",
                 "sync_error": message,
             }
+
+    @staticmethod
+    def revalidate_stale_indices(
+        *,
+        meetings: list[dict],
+        recording_event_ids: set[str],
+        matched_onedrive_files: list[dict],
+    ) -> dict:
+        """
+        Drop Chroma indices for calendar meetings that no longer have a valid recording
+        association after strict OneDrive matching.
+        """
+        meetings_by_id = {
+            (meeting.get("event_id") or meeting.get("meeting_id")): meeting
+            for meeting in meetings
+            if meeting.get("event_id") or meeting.get("meeting_id")
+        }
+        files_by_event_id = {
+            file_item.get("_catalog_event_id"): file_item
+            for file_item in matched_onedrive_files
+            if file_item.get("_catalog_event_id")
+        }
+
+        purged_meeting_ids: list[str] = []
+        for indexed in ChromaService.list_indexed_meetings():
+            meeting_id = indexed.get("event_id") or indexed.get("meeting_id")
+            if not meeting_id or str(meeting_id).startswith("onedrive:"):
+                continue
+
+            should_purge = False
+            if meeting_id not in recording_event_ids:
+                should_purge = True
+            else:
+                file_item = files_by_event_id.get(meeting_id)
+                meeting = meetings_by_id.get(meeting_id)
+                if file_item and meeting:
+                    title = meeting.get("title") or ""
+                    start_time = meeting.get("start_time") or meeting.get("end_time")
+                    if not OneDriveService._file_matches_meeting(
+                        file_item,
+                        title,
+                        start_time,
+                    ):
+                        should_purge = True
+
+            if not should_purge:
+                continue
+
+            ChromaService.delete_meeting_embeddings(meeting_id)
+            IngestionStateService.clear_status(meeting_id)
+            MeetingCatalogService._onedrive_items_by_event_id.pop(meeting_id, None)
+            purged_meeting_ids.append(meeting_id)
+
+        return {
+            "stale_indices_purged": len(purged_meeting_ids),
+            "stale_index_meeting_ids": purged_meeting_ids,
+        }
 
     @staticmethod
     def _build_catalog(

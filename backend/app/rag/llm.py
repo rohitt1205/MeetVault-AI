@@ -46,7 +46,13 @@ def _get_available_qwen_model() -> str:
     return preferred_model
 
 
-def _generate_with_ollama(prompt: str, model_name: str, *, temperature: float = 0.0) -> str:
+def _generate_with_ollama(
+    prompt: str,
+    model_name: str,
+    *,
+    temperature: float = 0.0,
+    num_predict: int = 768,
+) -> str:
     if not model_name:
         raise ValueError("RAG_MODEL must be set. Example: qwen2.5:7b")
 
@@ -56,9 +62,13 @@ def _generate_with_ollama(prompt: str, model_name: str, *, temperature: float = 
             "model": model_name,
             "prompt": prompt,
             "stream": False,
-            "options": {"temperature": temperature, "top_p": 0.9 if temperature > 0 else 0.1},
+            "options": {
+                "temperature": temperature,
+                "top_p": 0.9 if temperature > 0 else 0.1,
+                "num_predict": num_predict,
+            },
         },
-        timeout=60,
+        timeout=120,
     )
     response.raise_for_status()
     payload = response.json()
@@ -66,8 +76,13 @@ def _generate_with_ollama(prompt: str, model_name: str, *, temperature: float = 
 
 
 @retry(stop=stop_after_attempt(2), wait=wait_exponential(multiplier=1, min=1, max=4))
-def _generate_with_qwen(prompt: str, *, temperature: float = 0.0) -> str:
-    return _generate_with_ollama(prompt, _get_available_qwen_model(), temperature=temperature)
+def _generate_with_qwen(prompt: str, *, temperature: float = 0.0, num_predict: int = 768) -> str:
+    return _generate_with_ollama(
+        prompt,
+        _get_available_qwen_model(),
+        temperature=temperature,
+        num_predict=num_predict,
+    )
 
 
 def generate_answer(
@@ -76,6 +91,7 @@ def generate_answer(
     context: Optional[str] = None,
     *,
     temperature: float = 0.0,
+    num_predict: int = 768,
 ) -> str:
     """
     Calls the local Ollama/Qwen SLM to generate a grounded response.
@@ -84,7 +100,7 @@ def generate_answer(
     if query and not SafetyMiddleware.validate_input(query):
         return fallback_response
 
-    answer = _generate_with_qwen(prompt, temperature=temperature)
+    answer = _generate_with_qwen(prompt, temperature=temperature, num_predict=num_predict)
 
     return SafetyMiddleware.sanitize_output(
         SafetyMiddleware.validate_output(answer, context=context, query=query)

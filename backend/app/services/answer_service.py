@@ -9,6 +9,10 @@ SUMMARY_HINTS = (
     "key point",
     "key takeaway",
     "high level",
+    "more detail",
+    "in detail",
+    "elaborate",
+    "recap",
 )
 MEETING_QUESTION_HINTS = (
     "action item",
@@ -176,9 +180,9 @@ class AnswerService:
                         continue
                     seen.add(normalized_sentence)
                     selected_sentences.append(sentence)
-                    if len(selected_sentences) == 4:
+                    if len(selected_sentences) == 8:
                         break
-                if len(selected_sentences) == 4:
+                if len(selected_sentences) == 8:
                     break
 
             if selected_sentences:

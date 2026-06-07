@@ -1,5 +1,27 @@
 export const DEFAULT_OUTPUT_FORMAT = 'visual_card'
 
+export const DEFAULT_RAW_VIEW_MODE = 'markdown'
+
+export const RAW_VIEW_MODES = [
+  {
+    id: 'markdown',
+    label: 'Markdown',
+    description: 'Render headings and lists without card chrome.',
+  },
+  {
+    id: 'plain',
+    label: 'Plain text',
+    description: 'Show the model output exactly as plain text.',
+  },
+]
+
+export const RAW_VIEW_MODE_IDS = RAW_VIEW_MODES.map((mode) => mode.id)
+
+export const isValidRawViewMode = (value) => RAW_VIEW_MODE_IDS.includes(value)
+
+export const normalizeRawViewMode = (value) =>
+  isValidRawViewMode(value) ? value : DEFAULT_RAW_VIEW_MODE
+
 export const OUTPUT_FORMATS = [
   {
     id: 'visual_card',
@@ -40,3 +62,6 @@ export const getOutputFormatMeta = (value) =>
 
 export const outputPreferenceStorageKey = (userId) =>
   `meetvault-output-format:${userId || 'anonymous'}`
+
+export const rawViewStorageKey = (userId) =>
+  `meetvault-raw-view:${userId || 'anonymous'}`
