@@ -204,6 +204,25 @@ class ChromaService:
         return bool(results.get("ids"))
 
     @staticmethod
+    def get_meeting_title(meeting_id: str) -> str | None:
+        if not meeting_id:
+            return None
+
+        results = ChromaService.collection.get(
+            where={"meeting_id": meeting_id},
+            limit=1,
+        )
+        metadatas = results.get("metadatas") or []
+        if not metadatas:
+            return None
+
+        metadata = metadatas[0]
+        if not isinstance(metadata, dict):
+            return None
+        title = metadata.get("meeting_title")
+        return title if isinstance(title, str) and title.strip() else None
+
+    @staticmethod
     def get_status() -> dict:
         data = ChromaService.collection.get()
         metadatas = data.get("metadatas", [])

@@ -8,20 +8,79 @@ export const MEETING_CHAT_LEGACY_QUERY = ''
 
 /** Fields allowed on update (meeting chats store conversation in messages jsonb). */
 export const mapRagSourcesForUi = (sources = [], excerptLimit = 220) =>
-  (sources || []).slice(0, 5).map((source, index) => {
+  mapRagCitationsForUi(sources, excerptLimit)
+
+export const mapRagCitationsForUi = (sources = [], excerptLimit = 220) => {
+  if (!Array.isArray(sources) || !sources.length) return []
+
+  const looksNormalized = sources.every(
+    (item) => item && typeof item === 'object' && 'excerpt' in item,
+  )
+  if (looksNormalized) {
+    return sources.slice(0, 8).map((item, index) => ({
+      id: item.id || `source-${index}`,
+      speaker: item.speaker || 'Unknown speaker',
+      startTime: item.start_time || item.startTime || null,
+      endTime: item.end_time || item.endTime || null,
+      timeLabel: item.time_label || item.timeLabel || null,
+      meetingTitle: item.meeting_title || item.meetingTitle || null,
+      excerpt: item.excerpt || '',
+      sourceType: item.source_type || item.sourceType || null,
+      topic: item.topic || null,
+    }))
+  }
+
+  return (sources || []).slice(0, 8).map((source, index) => {
+    const metadata = source.metadata || {}
     const cleaned = (source.text || '').replace(/\s+/g, ' ').trim()
     const excerpt =
       cleaned.length <= excerptLimit
         ? cleaned
         : `${cleaned.slice(0, excerptLimit).trim()}…`
 
+    const speakerStart = metadata.speaker_start || null
+    const speakerEnd = metadata.speaker_end || null
+    const speaker =
+      speakerStart && speakerEnd && speakerStart !== speakerEnd
+        ? `${speakerStart} → ${speakerEnd}`
+        : speakerStart || speakerEnd || 'Unknown speaker'
+
+    const startTime = metadata.start_timestamp || null
+    const endTime = metadata.end_timestamp || null
+    const timeLabel =
+      startTime && endTime && startTime !== endTime
+        ? `${startTime} – ${endTime}`
+        : startTime || endTime || null
+
     return {
       id: source.chunk_id || `source-${index}`,
+      speaker,
+      startTime,
+      endTime,
+      timeLabel,
       excerpt,
-      start: source.metadata?.start_timestamp || null,
-      meetingTitle: source.metadata?.meeting_title || null,
+      meetingTitle: metadata.meeting_title || null,
+      sourceType: metadata.source_type || null,
+      topic: null,
     }
   })
+}
+
+export const formatCitationTimeLabel = (citation) =>
+  citation?.timeLabel ||
+  (citation?.startTime && citation?.endTime && citation.startTime !== citation.endTime
+    ? `${citation.startTime} – ${citation.endTime}`
+    : citation?.startTime || citation?.endTime || null)
+
+export const GROUNDED_ANSWER_MODES = new Set([
+  'rag_answer',
+  'extractive_summary',
+  'retrieval_brief',
+  'retrieval_only',
+])
+
+export const shouldShowAnswerSources = (mode, sources = []) =>
+  GROUNDED_ANSWER_MODES.has(mode) && Array.isArray(sources) && sources.length > 0
 
 export const sanitizeChatPatch = (patch) => {
   const clean = {}

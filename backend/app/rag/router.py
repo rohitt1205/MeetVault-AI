@@ -20,6 +20,7 @@ class IngestRequest(BaseModel):
 class QueryRequest(BaseModel):
     query: str
     meeting_id: str | None = None
+    output_format: str | None = None
 
 
 @router.post("/ingest")
@@ -55,6 +56,7 @@ def query_rag(
             user_key=user_key,
             graph_jwt=graph_jwt,
             supabase_jwt=supabase_jwt,
+            output_format=request.output_format,
         )
         return result
     except Exception as exc:

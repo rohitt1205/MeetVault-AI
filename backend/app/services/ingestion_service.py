@@ -680,6 +680,9 @@ class IngestionService:
             meeting = MeetingService.get_meeting_event(access_token, event_id)
             meeting_id = meeting.get("event_id") or event_id
             meeting_title = meeting.get("title") or "Untitled meeting"
+            catalog_drive_item = MeetingCatalogService.get_onedrive_item(meeting_id)
+            if catalog_drive_item:
+                meeting = {**meeting, "onedrive_item": catalog_drive_item}
 
         if (
             IngestionStateService.is_processed(meeting_id)
@@ -850,15 +853,11 @@ class IngestionService:
         )
 
         candidates: list[tuple[float, dict]] = []
-        fallback: dict | None = None
 
         for meeting in meetings:
             title = meeting.get("title") or ""
             if not title or not OneDriveService._titles_match(file_name, title):
                 continue
-
-            if fallback is None:
-                fallback = meeting
 
             meeting_time = OneDriveService._parse_graph_datetime(
                 meeting.get("start_time") or meeting.get("end_time"),
@@ -874,7 +873,15 @@ class IngestionService:
             candidates.sort(key=lambda item: item[0])
             return candidates[0][1]
 
-        return fallback
+        strong_matches = [
+            meeting
+            for meeting in meetings
+            if OneDriveService._titles_match_strong(file_name, meeting.get("title") or "")
+        ]
+        if len(strong_matches) == 1:
+            return strong_matches[0]
+
+        return None
 
     @staticmethod
     def ingest_recent_meetings(
@@ -1555,12 +1562,20 @@ class IngestionService:
             if transcript:
                 return transcript, "graph_transcript"
 
+        meeting_title = meeting.get("title") or ""
+        start_time = meeting.get("start_time") or meeting.get("end_time")
         assets = OneDriveService.find_meeting_assets(
             access_token,
-            meeting.get("title") or "",
+            meeting_title,
         )
 
         for transcript_file in assets["transcripts"]:
+            if not OneDriveService._file_matches_meeting(
+                transcript_file,
+                meeting_title,
+                start_time,
+            ):
+                continue
             transcript = OneDriveService.transcript_from_drive_item(
                 access_token,
                 transcript_file,
@@ -1569,6 +1584,12 @@ class IngestionService:
                 return transcript, "onedrive_transcript"
 
         for video_file in assets["videos"]:
+            if not OneDriveService._file_matches_meeting(
+                video_file,
+                meeting_title,
+                start_time,
+            ):
+                continue
             transcript = RecordingService.transcribe_drive_item(access_token, video_file)
             if transcript:
                 return transcript, "onedrive_video_transcription"

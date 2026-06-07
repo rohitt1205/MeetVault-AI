@@ -9,6 +9,10 @@ SUMMARY_HINTS = (
     "key point",
     "key takeaway",
     "high level",
+    "more detail",
+    "in detail",
+    "elaborate",
+    "recap",
 )
 MEETING_QUESTION_HINTS = (
     "action item",
@@ -44,6 +48,11 @@ QUESTION_FILLER_WORDS = {
     "hi",
     "hey",
 }
+TOPIC_LEAD_PATTERN = re.compile(
+    r"^(?:please\s+)?(?:explain|describe|tell me about|what is|what are|what was|how does|how do|talk about|discuss)\s+",
+    re.IGNORECASE,
+)
+TOPIC_SPLIT_PATTERN = re.compile(r"\s+and\s+|,\s*|\s+&\s+", re.IGNORECASE)
 MAX_BRIEF_EXCERPT_CHARS = 280
 LOW_SIGNAL_WORDS = {
     "ah",
@@ -67,6 +76,77 @@ class AnswerService:
     def has_summary_intent(query: str) -> bool:
         query_lower = (query or "").lower()
         return any(hint in query_lower for hint in SUMMARY_HINTS)
+
+    @staticmethod
+    def extract_query_topics(query: str) -> list[str]:
+        """Split multi-part questions like 'explain lenses and recipe' into topics."""
+        normalized = (query or "").strip()
+        if not normalized or AnswerService.has_summary_intent(normalized):
+            return []
+
+        without_lead = TOPIC_LEAD_PATTERN.sub("", normalized).strip()
+        without_lead = without_lead.rstrip("?.!").strip()
+        if not without_lead:
+            return []
+
+        parts = [
+            re.sub(r"\s+", " ", part).strip()
+            for part in TOPIC_SPLIT_PATTERN.split(without_lead)
+            if part and part.strip()
+        ]
+        if len(parts) < 2:
+            return []
+
+        topics: list[str] = []
+        for part in parts:
+            tokens = [
+                token
+                for token in re.findall(r"[a-zA-Z0-9']+", part.lower())
+                if len(token) > 1
+                and token not in QUESTION_FILLER_WORDS
+                and token not in LOW_SIGNAL_WORDS
+            ]
+            if not tokens:
+                continue
+            topics.append(" ".join(tokens))
+
+        return topics if len(topics) >= 2 else []
+
+    @staticmethod
+    def extract_primary_topic(query: str) -> str | None:
+        """Single focus of a targeted question, e.g. 'explain lenses' -> 'lenses'."""
+        normalized = (query or "").strip()
+        if not normalized or AnswerService.has_summary_intent(normalized):
+            return None
+        if AnswerService.extract_query_topics(normalized):
+            return None
+
+        without_lead = TOPIC_LEAD_PATTERN.sub("", normalized).strip()
+        without_lead = without_lead.rstrip("?.!").strip()
+        if not without_lead:
+            return None
+
+        tokens = [
+            token
+            for token in re.findall(r"[a-zA-Z0-9']+", without_lead.lower())
+            if len(token) > 1
+            and token not in QUESTION_FILLER_WORDS
+            and token not in LOW_SIGNAL_WORDS
+        ]
+        if not tokens:
+            return None
+        return " ".join(tokens)
+
+    @staticmethod
+    def citation_limit_for_query(query: str) -> int:
+        """Broad summaries show multiple proofs; multi-topic questions show one per topic."""
+        if AnswerService.has_summary_intent(query):
+            return 5
+
+        topics = AnswerService.extract_query_topics(query)
+        if topics:
+            return min(len(topics), 5)
+        return 1
 
     @staticmethod
     def is_vague_or_social_query(query: str) -> bool:
@@ -176,9 +256,9 @@ class AnswerService:
                         continue
                     seen.add(normalized_sentence)
                     selected_sentences.append(sentence)
-                    if len(selected_sentences) == 4:
+                    if len(selected_sentences) == 8:
                         break
-                if len(selected_sentences) == 4:
+                if len(selected_sentences) == 8:
                     break
 
             if selected_sentences:

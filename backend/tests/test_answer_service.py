@@ -44,6 +44,30 @@ class AnswerServiceTests(unittest.TestCase):
 
         self.assertIsNone(answer)
 
+    def test_citation_limit_is_one_for_targeted_question(self):
+        self.assertEqual(AnswerService.citation_limit_for_query("explain lenses"), 1)
+
+    def test_citation_limit_matches_multi_topic_question(self):
+        self.assertEqual(
+            AnswerService.citation_limit_for_query("explain lenses and recipe"),
+            2,
+        )
+
+    def test_extract_query_topics_splits_on_and(self):
+        self.assertEqual(
+            AnswerService.extract_query_topics("explain lenses and recipe"),
+            ["lenses", "recipe"],
+        )
+
+    def test_extract_primary_topic_for_single_focus(self):
+        self.assertEqual(AnswerService.extract_primary_topic("explain lenses"), "lenses")
+
+    def test_citation_limit_is_higher_for_summary(self):
+        self.assertEqual(
+            AnswerService.citation_limit_for_query("give summary of this meeting"),
+            5,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

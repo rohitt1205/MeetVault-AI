@@ -1,4 +1,5 @@
-import ChatMarkdown from '../components/ChatMarkdown'
+import AnswerPresentation from '../components/AnswerPresentation'
+import { answerEyebrowForMode, isConversationalMode } from '../utils/answerFormatting'
 
 const formatDateTime = (value) => {
   if (!value) return 'Not yet'
@@ -24,20 +25,6 @@ const autoSyncMessage = (status) => {
   return workspace.message || 'Automatic sync is watching for new recording assets.'
 }
 
-const answerEyebrowForMode = (mode) => {
-  switch (mode) {
-    case 'meeting_assistant':
-    case 'conversational':
-    case 'conversational_fallback':
-      return 'MeetVault'
-    case 'retrieval_brief':
-    case 'retrieval_only':
-      return 'Workspace answer'
-    default:
-      return 'Answer'
-  }
-}
-
 export default function WorkspaceLanding({
   autoSyncStatus,
   autoSyncError,
@@ -46,6 +33,8 @@ export default function WorkspaceLanding({
   isSearching = false,
   searchMessage = '',
   pipelineNotice = '',
+  outputPreference,
+  rawViewMode,
   onQueryChange,
   onSubmit,
   onRefreshAutoSync,
@@ -80,8 +69,17 @@ export default function WorkspaceLanding({
                 ) : (
                   <article className="message-row assistant">
                     <div className="message-bubble assistant">
-                      <p className="message-label">{answerEyebrowForMode(turn.mode)}</p>
-                      <ChatMarkdown text={turn.text} />
+                      {!isConversationalMode(turn.mode) ? (
+                        <p className="message-label">{answerEyebrowForMode(turn.mode)}</p>
+                      ) : null}
+                      <AnswerPresentation
+                        text={turn.text}
+                        mode={turn.mode}
+                        format={turn.outputFormat || outputPreference}
+                        rawViewMode={turn.rawViewMode || rawViewMode}
+                        sourceCount={turn.sourceCount}
+                        sources={turn.sources || []}
+                      />
                     </div>
                   </article>
                 )}

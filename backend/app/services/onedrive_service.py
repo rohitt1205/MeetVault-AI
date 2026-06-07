@@ -1027,6 +1027,22 @@ class OneDriveService:
         normalized = re.sub(r"[^a-z0-9]+", " ", (value or "").lower())
         return " ".join(normalized.split())
 
+    # Words that appear in many Teams titles/recordings and must not drive fuzzy matches alone.
+    _GENERIC_TITLE_WORDS = frozenset({
+        "meeting", "sync", "call", "weekly", "daily", "standup", "review", "update",
+        "check", "connect", "general", "virtual", "recording", "team", "internal",
+        "external", "session", "follow", "following", "video", "audio", "transcript",
+        "tips", "productive", "for", "the", "and", "with", "one", "your", "how", "guide",
+    })
+
+    @staticmethod
+    def _title_words(value: str) -> set[str]:
+        return {
+            word
+            for word in OneDriveService._normalize_match_text(value).split()
+            if len(word) > 2
+        }
+
     @staticmethod
     def _title_from_recording_filename(file_name: str) -> str | None:
         """Teams often names files like 'Weekly Sync-20260430_143022.mp4'."""
@@ -1035,6 +1051,27 @@ class OneDriveService:
         if match:
             return match.group("title").strip()
         return None
+
+    @staticmethod
+    def _titles_match_strong(file_name: str, meeting_title: str) -> bool:
+        """Exact or substring title match — safe without a recording timestamp."""
+        file_text = OneDriveService._normalize_match_text(file_name)
+        meeting_text = OneDriveService._normalize_match_text(meeting_title)
+        if not file_text or not meeting_text:
+            return False
+        if meeting_text in file_text or file_text in meeting_text:
+            return True
+
+        extracted_title = OneDriveService._title_from_recording_filename(file_name)
+        if not extracted_title:
+            return False
+
+        extracted_text = OneDriveService._normalize_match_text(extracted_title)
+        return (
+            extracted_text == meeting_text
+            or meeting_text in extracted_text
+            or extracted_text in meeting_text
+        )
 
     @staticmethod
     def _titles_match(file_name: str, meeting_title: str) -> bool:
@@ -1048,20 +1085,32 @@ class OneDriveService:
         extracted_title = OneDriveService._title_from_recording_filename(file_name)
         if extracted_title:
             extracted_text = OneDriveService._normalize_match_text(extracted_title)
-            if extracted_text == meeting_text or meeting_text in extracted_text:
+            if (
+                extracted_text == meeting_text
+                or meeting_text in extracted_text
+                or extracted_text in meeting_text
+            ):
                 return True
 
+        file_words = OneDriveService._title_words(file_name)
         meeting_words = [word for word in meeting_text.split() if len(word) > 2]
-        if len(meeting_words) < 2:
-            return bool(meeting_words and meeting_words[0] in file_text)
+        if not meeting_words:
+            return False
+        if len(meeting_words) == 1:
+            return meeting_words[0] in file_words
 
-        matched_words = sum(1 for word in meeting_words if word in file_text)
-        if matched_words >= max(2, len(meeting_words) - 1):
-            return True
+        matched_words = [word for word in meeting_words if word in file_words]
+        if not matched_words:
+            return False
 
-        # Allow a single distinctive word (e.g. project codename) when it is long enough.
-        long_words = [word for word in meeting_words if len(word) >= 4]
-        return any(word in file_text for word in long_words)
+        generic_words = OneDriveService._GENERIC_TITLE_WORDS
+        distinctive_meeting = [word for word in meeting_words if word not in generic_words]
+        distinctive_matched = [word for word in matched_words if word not in generic_words]
+
+        if distinctive_meeting:
+            return len(distinctive_matched) >= max(1, len(distinctive_meeting) - 1)
+
+        return len(matched_words) >= len(meeting_words)
 
     @staticmethod
     def _parse_graph_datetime(value: str | None) -> datetime | None:
@@ -1136,16 +1185,12 @@ class OneDriveService:
                 file_item.get("lastModifiedDateTime") or file_item.get("createdDateTime"),
             )
             candidates: list[tuple[float, str]] = []
-            fallback_event_id: str | None = None
 
             for meeting in meetings:
                 event_id = meeting.get("event_id") or meeting.get("meeting_id")
                 title = meeting.get("title") or ""
                 if not event_id or not title or not OneDriveService._titles_match(file_name, title):
                     continue
-
-                if fallback_event_id is None:
-                    fallback_event_id = event_id
 
                 meeting_time = OneDriveService._parse_graph_datetime(
                     meeting.get("start_time") or meeting.get("end_time"),
@@ -1161,8 +1206,15 @@ class OneDriveService:
             if candidates:
                 candidates.sort(key=lambda item: item[0])
                 matched_event_id = candidates[0][1]
-            elif fallback_event_id:
-                matched_event_id = fallback_event_id
+            else:
+                strong_matches = [
+                    meeting.get("event_id") or meeting.get("meeting_id")
+                    for meeting in meetings
+                    if OneDriveService._titles_match_strong(file_name, meeting.get("title") or "")
+                    and (meeting.get("event_id") or meeting.get("meeting_id"))
+                ]
+                if len(strong_matches) == 1:
+                    matched_event_id = strong_matches[0]
 
             if matched_event_id:
                 event_ids.add(matched_event_id)

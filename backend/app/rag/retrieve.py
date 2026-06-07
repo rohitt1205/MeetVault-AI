@@ -8,8 +8,9 @@ from app.mcp.calendar import calendar_connector
 from app.mcp.slack import slack_connector
 from app.mcp.salesforce import salesforce_connector
 from app.mcp.connection_store import MCPConnectionStore
+from app.rag.citations import build_citations
 from app.rag.llm import generate_answer, generate_conversational_answer
-from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT, WORK_SUMMARY_PROMPT
+from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT, WORK_SUMMARY_PROMPT, build_rag_prompt, normalize_output_format
 from app.services.answer_service import AnswerService
 from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
@@ -271,6 +272,12 @@ def _is_not_found_answer(answer: str) -> bool:
     )
 
 
+def _attach_citations(payload: dict, *, limit: int = 5, query: str | None = None) -> dict:
+    sources = payload.get("sources") or []
+    payload["citations"] = build_citations(sources, limit=limit, query=query)
+    return payload
+
+
 def _meeting_title_from_sources(sources: list[dict]) -> str:
     for source in sources:
         title = (source.get("metadata") or {}).get("meeting_title")
@@ -293,12 +300,28 @@ def _topic_hint_from_sources(sources: list[dict]) -> str:
     return AnswerService._truncate_excerpt(text, limit=220)
 
 
+TIMESTAMP_PATTERN = re.compile(r"\b\d{1,2}:\d{2}(:\d{2})?(?:\.\d{1,3})?\b")
+SPEAKER_LINE_PATTERN = re.compile(r"(?m)^\s*[\w\s.'-]{1,48}:\s+\S")
+
+
 def _looks_like_transcript_dump(answer: str) -> bool:
+    """Detect pasted transcript text, not structured summaries or bullet answers."""
     normalized = (answer or "").strip()
-    if len(normalized) > 700:
+    if len(normalized) < 600:
+        return False
+
+    timestamp_count = len(TIMESTAMP_PATTERN.findall(normalized))
+    speaker_lines = len(SPEAKER_LINE_PATTERN.findall(normalized))
+
+    if timestamp_count >= 3:
         return True
-    if normalized.count("\n- ") >= 2 and len(normalized) > 400:
+    if speaker_lines >= 5:
         return True
+
+    # Long unstructured wall without markdown structure
+    if len(normalized) > 2800 and normalized.count("\n") < 4:
+        return True
+
     return False
 
 
@@ -331,13 +354,13 @@ def _generate_conversational_response(user_query: str, sources: list[dict]) -> d
         )
         answer_mode = "conversational_fallback"
 
-    return {
+    return _attach_citations({
         "query": user_query,
         "answer": answer,
         "answer_mode": answer_mode,
         "llm_error": llm_error,
         "sources": sources[:2],
-    }
+    }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)
 
 
 def _detect_tool_calls_with_llm(
@@ -732,10 +755,21 @@ def retrieve_and_answer(
     user_key: str = "demo",
     graph_jwt: str | None = None,
     supabase_jwt: str | None = None,
+    output_format: str | None = None,
 ) -> dict:
     """
     Retrieves relevant transcript chunks from ChromaDB and generates a grounded answer.
     """
+    resolved_format = normalize_output_format(output_format)
+    is_summary = AnswerService.has_summary_intent(user_query)
+    query_topics = AnswerService.extract_query_topics(user_query)
+    if is_summary:
+        rank_limit = 8
+    elif len(query_topics) >= 2:
+        rank_limit = min(12, max(8, len(query_topics) * 4))
+    else:
+        rank_limit = 5
+
     explicit_providers = _explicit_provider_hints(user_query)
     mcp_context, mcp_sources, is_work_summary = _get_mcp_context(
         user_query,
@@ -759,21 +793,22 @@ def retrieve_and_answer(
             )
             answer_mode = "work_summary_fallback"
 
-        return {
+        return _attach_citations({
             "query": user_query,
             "answer": answer,
             "answer_mode": answer_mode,
+            "output_format": resolved_format,
             "llm_error": llm_error,
             "sources": mcp_sources,
-        }
+        }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)
 
     query_embedding = EmbeddingService.generate_query_embedding(user_query)
 
     results = ChromaService.query_embeddings(
         query_embedding,
         meeting_id=meeting_id,
-        n_results=5,
-        candidate_pool_size=80,
+        n_results=8 if is_summary else 5,
+        candidate_pool_size=120 if is_summary else 80,
         allowed_source_types=QUERYABLE_SOURCE_TYPES,
     )
 
@@ -800,20 +835,21 @@ def retrieve_and_answer(
                 answer = f"I found the following tool context:\n\n{mcp_context}"
                 answer_mode = "mcp_only_fallback"
 
-            return {
+            return _attach_citations({
                 "query": user_query,
                 "answer": answer,
                 "answer_mode": answer_mode,
+                "output_format": resolved_format,
                 "llm_error": llm_error,
                 "sources": mcp_sources,
-            }
+            }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)
 
-        return {
+        return _attach_citations({
             "query": user_query,
             "answer": "I don't have any meeting transcripts or connected tool context to answer that.",
             "answer_mode": "no_context",
             "sources": [],
-        }
+        })
 
     candidate_sources = [
         _source_from_result(
@@ -828,6 +864,7 @@ def retrieve_and_answer(
     sources = _rank_sources(
         user_query,
         [source for source in candidate_sources if _is_queryable_source(source)],
+        limit=rank_limit,
     )
 
     all_sources = [*sources, *mcp_sources]
@@ -849,16 +886,17 @@ def retrieve_and_answer(
             answer = f"I found the following tool context:\n\n{mcp_context}"
             answer_mode = "mcp_only_fallback"
 
-        return {
+        return _attach_citations({
             "query": user_query,
             "answer": answer,
             "answer_mode": answer_mode,
+            "output_format": resolved_format,
             "llm_error": llm_error,
             "sources": mcp_sources,
-        }
+        }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)
 
     if not all_sources:
-        return {
+        return _attach_citations({
             "query": user_query,
             "answer": (
                 "I found embeddings in ChromaDB, but none from Microsoft Graph, "
@@ -866,7 +904,7 @@ def retrieve_and_answer(
             ),
             "answer_mode": "no_microsoft_context",
             "sources": [],
-        }
+        })
 
     if AnswerService.is_vague_or_social_query(user_query):
         return _generate_conversational_response(user_query, all_sources)
@@ -881,16 +919,16 @@ def retrieve_and_answer(
     if mcp_context:
         context_text = f"{context_text}\n\n---\n\n{mcp_context}".strip()
 
-    safe_query = user_query.replace("{", "{{").replace("}", "}}")
-    final_prompt = RAG_SYSTEM_PROMPT.format(
-        context=context_text,
-        query=safe_query,
-    )
+    final_prompt = build_rag_prompt(context_text, user_query, resolved_format)
+    num_predict = 1536 if is_summary else 768
 
     llm_error = None
     try:
         answer = generate_answer(
-            final_prompt, query=user_query, context=context_text
+            final_prompt,
+            query=user_query,
+            context=context_text,
+            num_predict=num_predict,
         )
         answer_mode = "rag_answer"
     except Exception as exc:
@@ -906,7 +944,11 @@ def retrieve_and_answer(
             )
             answer_mode = "retrieval_only"
 
-    if _is_not_found_answer(answer) or _looks_like_transcript_dump(answer):
+    should_use_extractive_fallback = _is_not_found_answer(answer) or (
+        _looks_like_transcript_dump(answer) and not is_summary
+    )
+
+    if should_use_extractive_fallback:
         if AnswerService.is_vague_or_social_query(user_query):
             return _generate_conversational_response(user_query, all_sources)
 
@@ -922,10 +964,11 @@ def retrieve_and_answer(
             )
             answer_mode = "clarification"
 
-    return {
+    return _attach_citations({
         "query": user_query,
         "answer": answer,
         "answer_mode": answer_mode,
+        "output_format": resolved_format,
         "llm_error": llm_error,
         "sources": all_sources,
-    }
+    }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)
