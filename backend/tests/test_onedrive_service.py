@@ -319,6 +319,40 @@ class OneDriveServiceTests(unittest.TestCase):
         self.assertEqual(matched, {"evt-1"})
         self.assertEqual(unmatched, [])
 
+    def test_titles_match_rejects_generic_calendar_title_against_unrelated_recording(self):
+        self.assertFalse(
+            OneDriveService._titles_match(
+                "Following CRMA June 05 Meeting Recording.mp4",
+                "6 Tips for Productive 1:1 Meeting",
+            )
+        )
+
+    def test_match_recording_assets_requires_title_and_time(self):
+        meetings = [
+            {
+                "event_id": "evt-tips",
+                "title": "6 Tips for Productive 1:1 Meeting",
+                "start_time": "2026-06-01T10:00:00+00:00",
+            },
+        ]
+        assets = {
+            "transcripts": [],
+            "videos": [
+                {
+                    "name": "Following CRMA June 05 Meeting Recording.mp4",
+                    "lastModifiedDateTime": "2026-06-05T12:00:00Z",
+                },
+            ],
+        }
+
+        matched, unmatched = OneDriveService.match_recording_assets_to_meetings(
+            meetings,
+            assets,
+        )
+
+        self.assertEqual(matched, set())
+        self.assertEqual(len(unmatched), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

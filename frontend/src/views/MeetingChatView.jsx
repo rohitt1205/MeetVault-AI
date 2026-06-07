@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
-import ChatMarkdown from '../components/ChatMarkdown'
+import AnswerPresentation from '../components/AnswerPresentation'
+import { answerEyebrowForMode, isConversationalMode } from '../utils/answerFormatting'
 import {
   ingestionProgressPercent,
   ingestionStageLabel,
@@ -14,23 +15,6 @@ const SUGGESTED_PROMPTS = [
   'List action items mentioned',
 ]
 
-const answerEyebrowForMode = (mode) => {
-  switch (mode) {
-    case 'extractive_summary':
-      return 'Summary'
-    case 'meeting_assistant':
-    case 'conversational':
-    case 'conversational_fallback':
-    case 'clarification':
-      return 'MeetVault'
-    case 'retrieval_brief':
-    case 'retrieval_only':
-      return 'Assistant'
-    default:
-      return 'Answer'
-  }
-}
-
 export default function MeetingChatView({
   title,
   chatStatus,
@@ -40,6 +24,8 @@ export default function MeetingChatView({
   isSearching,
   searchMessage,
   pipelineNotice,
+  outputPreference,
+  rawViewMode,
   onQueryChange,
   onSubmit,
   onSuggestedQuery,
@@ -154,8 +140,17 @@ export default function MeetingChatView({
                   ) : (
                     <article className="message-row assistant">
                       <div className="message-bubble assistant">
-                        <p className="message-label">{answerEyebrowForMode(turn.mode)}</p>
-                        <ChatMarkdown text={turn.text} />
+                        {!isConversationalMode(turn.mode) ? (
+                          <p className="message-label">{answerEyebrowForMode(turn.mode)}</p>
+                        ) : null}
+                        <AnswerPresentation
+                          text={turn.text}
+                          mode={turn.mode}
+                          format={turn.outputFormat || outputPreference}
+                          rawViewMode={turn.rawViewMode || rawViewMode}
+                          sourceCount={turn.sourceCount}
+                          sources={turn.sources || []}
+                        />
                       </div>
                     </article>
                   )}

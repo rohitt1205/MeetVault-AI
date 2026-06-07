@@ -340,12 +340,14 @@ def get_ingestion_status(meeting_id: str, authorization: str = Header(None)):
     get_access_token(authorization)
     if ChromaService.has_meeting_embeddings(meeting_id):
         status = IngestionStateService.get_status(meeting_id)
+        indexed_meeting_title = ChromaService.get_meeting_title(meeting_id)
         return {
             **status,
             "meeting_id": meeting_id,
             "status": "EMBEDDED",
             "stage": "ready",
             "message": status.get("message") or "Meeting is ready for chat.",
+            "indexed_meeting_title": indexed_meeting_title,
         }
     return IngestionStateService.get_status(meeting_id)
 

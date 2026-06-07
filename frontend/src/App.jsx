@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabase'
 import MCPPanel from './components/mcp/MCPPanel'
+import FormatPreview from './components/FormatPreview'
 import MeetingsGridView from './views/MeetingsGridView'
 import MeetingChatView from './views/MeetingChatView'
 import WorkspaceLanding from './views/WorkspaceLanding'
@@ -8,12 +9,26 @@ import OnboardingView from './views/OnboardingView'
 import { publishMcpOAuthEvent, subscribeMcpOAuthEvents } from './utils/mcpOAuthSync'
 import { mcpService } from './services/mcpService'
 import {
+  DEFAULT_OUTPUT_FORMAT,
+  DEFAULT_RAW_VIEW_MODE,
+  OUTPUT_FORMATS,
+  RAW_VIEW_MODES,
+  getOutputFormatMeta,
+  isValidOutputFormat,
+  isValidRawViewMode,
+  normalizeOutputFormat,
+  normalizeRawViewMode,
+  outputPreferenceStorageKey,
+  rawViewStorageKey,
+} from './utils/outputPreferences'
+import {
   CHAT_HISTORY_TABLE,
   CHAT_SELECT_FIELDS,
   ingestionStatusUnchanged,
   isChatPreparing,
   isChatReady,
   mapMeetingChatRow,
+  mapRagCitationsForUi,
   mapWorkspaceChatRow,
   MEETING_CHAT_LEGACY_QUERY,
   sanitizeChatPatch,
@@ -39,6 +54,42 @@ const titleFromQuery = (value) => {
   const words = (value || '').trim().split(/\s+/).filter(Boolean)
   if (words.length === 0) return 'Workspace chat'
   return words.slice(0, 6).join(' ')
+}
+const normalizeChatTitle = (value) =>
+  String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+
+const chatTitleMatchesIndex = (chatTitle, indexedTitle) => {
+  const left = normalizeChatTitle(chatTitle)
+  const right = normalizeChatTitle(indexedTitle)
+  if (!left || !right) return true
+  if (left === right || left.includes(right) || right.includes(left)) return true
+
+  const leftWords = left.split(/\s+/).filter((word) => word.length > 2)
+  const rightWords = new Set(right.split(/\s+/).filter((word) => word.length > 2))
+  if (!leftWords.length || !rightWords.size) return false
+
+  const overlap = leftWords.filter((word) => rightWords.has(word)).length
+  return overlap >= Math.min(2, leftWords.length)
+}
+
+const isStaleMeetingChat = (row, ingestion) => {
+  if (!row || ingestion?.status === 'EMBEDDED') {
+    if (ingestion?.status === 'EMBEDDED') {
+      const indexedTitle = ingestion.indexed_meeting_title
+      const chatTitle = row.title || row.meetingTitle
+      return indexedTitle && !chatTitleMatchesIndex(chatTitle, indexedTitle)
+    }
+    return false
+  }
+
+  if (row.status === 'ready' && (row.messages || []).length > 0) {
+    return true
+  }
+
+  return false
 }
 const mcpServers = [
   {
@@ -151,6 +202,13 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(false)
   const [settingsView, setSettingsView] = useState('appearance')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || 'light')
+  const [outputPreference, setOutputPreference] = useState('')
+  const [previewFormat, setPreviewFormat] = useState(DEFAULT_OUTPUT_FORMAT)
+  const [rawViewMode, setRawViewMode] = useState(DEFAULT_RAW_VIEW_MODE)
+  const [hasPreferenceLoaded, setHasPreferenceLoaded] = useState(false)
+  const [isPreferenceLoading, setIsPreferenceLoading] = useState(false)
+  const [preferenceSaving, setPreferenceSaving] = useState(false)
+  const [preferenceError, setPreferenceError] = useState('')
 
   const [activeNav, setActiveNav] = useState('workspace')
   const [workspaceChats, setWorkspaceChats] = useState([])
@@ -178,11 +236,14 @@ function App() {
   const catalogSyncInFlightRef = useRef(false)
   const catalogBootstrapDoneRef = useRef(false)
   const syncCatalogRef = useRef(null)
+  const loadMeetingChatsRef = useRef(null)
   const lastBackendWarnAtRef = useRef(0)
   const autoSyncRegisteredTokenRef = useRef('')
 
   const [query, setQuery] = useState('')
-  const [isSearching, setIsSearching] = useState(false)
+  const [searchingMeetingChatId, setSearchingMeetingChatId] = useState(null)
+  const [searchingWorkspaceChatId, setSearchingWorkspaceChatId] = useState(null)
+  const [summarizingChatIds, setSummarizingChatIds] = useState([])
   const [isDeletingChat, setIsDeletingChat] = useState(false)
   const [searchMessage, setSearchMessage] = useState('')
   const [pipelineNotice, setPipelineNotice] = useState('')
@@ -215,6 +276,29 @@ function App() {
   const activeIngestion = activeChat?.meetingId
     ? ingestionByMeeting[activeChat.meetingId]
     : null
+
+  const isMeetingChatBusy = useCallback(
+    (chatId) =>
+      Boolean(chatId) &&
+      (searchingMeetingChatId === chatId || summarizingChatIds.includes(chatId)),
+    [searchingMeetingChatId, summarizingChatIds],
+  )
+
+  const isWorkspaceChatBusy = useCallback(
+    (chatId) => Boolean(chatId) && searchingWorkspaceChatId === chatId,
+    [searchingWorkspaceChatId],
+  )
+
+  const markSummarizingChat = useCallback((chatId, busy) => {
+    if (!chatId) return
+    setSummarizingChatIds((current) => {
+      const isBusy = current.includes(chatId)
+      if (busy) {
+        return isBusy ? current : [...current, chatId]
+      }
+      return isBusy ? current.filter((id) => id !== chatId) : current
+    })
+  }, [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -271,6 +355,199 @@ function App() {
   useEffect(() => {
     currentSupabaseToken = supabaseToken
   }, [supabaseToken])
+  const saveOutputPreference = useCallback(
+    async (format) => {
+      const nextFormat = isValidOutputFormat(format) ? format : DEFAULT_OUTPUT_FORMAT
+      setPreferenceSaving(true)
+      setPreferenceError('')
+      setOutputPreference(nextFormat)
+      setPreviewFormat(nextFormat)
+
+      if (userId) {
+        localStorage.setItem(outputPreferenceStorageKey(userId), nextFormat)
+      }
+
+      try {
+        if (userId) {
+          const { error } = await supabase
+            .from('user_preferences')
+            .upsert(
+              {
+                user_id: userId,
+                output_format: nextFormat,
+                raw_view_mode: rawViewMode,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'user_id' },
+            )
+
+          if (error) throw error
+        }
+      } catch (error) {
+        console.error('Output preference save failed:', error)
+        setPreferenceError(
+          'Saved on this device. Run supabase migrations 005–006 if cloud sync fails.',
+        )
+      } finally {
+        setHasPreferenceLoaded(true)
+        setPreferenceSaving(false)
+      }
+    },
+    [rawViewMode, userId],
+  )
+
+  const saveRawViewMode = useCallback(
+    async (mode) => {
+      const nextMode = isValidRawViewMode(mode) ? mode : DEFAULT_RAW_VIEW_MODE
+      setPreferenceSaving(true)
+      setPreferenceError('')
+      setRawViewMode(nextMode)
+
+      if (userId) {
+        localStorage.setItem(rawViewStorageKey(userId), nextMode)
+      }
+
+      try {
+        if (userId && outputPreference) {
+          const { error } = await supabase
+            .from('user_preferences')
+            .upsert(
+              {
+                user_id: userId,
+                output_format: outputPreference,
+                raw_view_mode: nextMode,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'user_id' },
+            )
+
+          if (error) throw error
+        }
+      } catch (error) {
+        console.error('Raw view preference save failed:', error)
+        setPreferenceError('Raw view saved locally. Run migration 006 for Supabase sync.')
+      } finally {
+        setPreferenceSaving(false)
+      }
+    },
+    [outputPreference, userId],
+  )
+
+  const buildAssistantMessage = useCallback(
+    (payload, answerText) => {
+      const citations = mapRagCitationsForUi(payload.citations || payload.sources || [])
+      return {
+        id: `assistant-${crypto.randomUUID()}`,
+        role: 'assistant',
+        text: answerText,
+        mode: payload.answer_mode || 'rag_answer',
+        outputFormat: normalizeOutputFormat(payload.output_format || outputPreference),
+        rawViewMode,
+        sources: citations,
+        sourceCount: citations.length,
+        createdAt: new Date().toISOString(),
+      }
+    },
+    [outputPreference, rawViewMode],
+  )
+
+  useEffect(() => {
+    if (!userId) {
+      return undefined
+    }
+
+    let cancelled = false
+    const storageKey = outputPreferenceStorageKey(userId)
+    const rawStorageKey = rawViewStorageKey(userId)
+    const localFormat = localStorage.getItem(storageKey)
+    const localRawView = localStorage.getItem(rawStorageKey)
+
+    const loadPreference = async () => {
+      setIsPreferenceLoading(true)
+      setHasPreferenceLoaded(false)
+      setPreferenceError('')
+
+      try {
+        const { data, error } = await supabase
+          .from('user_preferences')
+          .select('output_format, raw_view_mode')
+          .eq('user_id', userId)
+          .maybeSingle()
+
+        if (cancelled) return
+        if (error) throw error
+
+        if (isValidRawViewMode(data?.raw_view_mode)) {
+          setRawViewMode(data.raw_view_mode)
+          localStorage.setItem(rawStorageKey, data.raw_view_mode)
+        } else if (isValidRawViewMode(localRawView)) {
+          setRawViewMode(localRawView)
+        }
+
+        if (isValidOutputFormat(data?.output_format)) {
+          setOutputPreference(data.output_format)
+          setPreviewFormat(data.output_format)
+          localStorage.setItem(storageKey, data.output_format)
+          return
+        }
+
+        if (isValidOutputFormat(localFormat)) {
+          setOutputPreference(localFormat)
+          setPreviewFormat(localFormat)
+          const { error: syncError } = await supabase
+            .from('user_preferences')
+            .upsert(
+              {
+                user_id: userId,
+                output_format: localFormat,
+                raw_view_mode: isValidRawViewMode(localRawView)
+                  ? localRawView
+                  : DEFAULT_RAW_VIEW_MODE,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'user_id' },
+            )
+          if (syncError && !cancelled) {
+            setPreferenceError(
+              'Preference is saved on this device. Supabase sync is not ready yet.',
+            )
+          }
+          return
+        }
+
+        setOutputPreference('')
+        setPreviewFormat(DEFAULT_OUTPUT_FORMAT)
+      } catch (error) {
+        if (cancelled) return
+        console.error('Output preference load failed:', error)
+        if (isValidOutputFormat(localFormat)) {
+          setOutputPreference(localFormat)
+          setPreviewFormat(localFormat)
+        } else {
+          setOutputPreference('')
+          setPreviewFormat(DEFAULT_OUTPUT_FORMAT)
+        }
+        if (isValidRawViewMode(localRawView)) {
+          setRawViewMode(localRawView)
+        }
+        setPreferenceError(
+          'Preference is stored locally until Supabase migrations 005–006 are applied.',
+        )
+      } finally {
+        if (!cancelled) {
+          setHasPreferenceLoaded(true)
+          setIsPreferenceLoading(false)
+        }
+      }
+    }
+
+    void loadPreference()
+
+    return () => {
+      cancelled = true
+    }
+  }, [userId])
+>>>>>>> origin/main
 
   const userProfile = useMemo(() => {
     const metadata = user?.user_metadata || {}
@@ -421,19 +698,43 @@ function App() {
             }
           }),
         )
-        rows = rows
-          .map((row, index) => {
-            const ingestion = statusChecks[index]
-            if (ingestion?.status === 'EMBEDDED') return { ...row, status: 'ready' }
-            if (['QUEUED', 'PROCESSING'].includes(ingestion?.status)) {
-              return { ...row, status: 'preparing' }
+
+        const reconciledRows = []
+        for (let index = 0; index < rows.length; index += 1) {
+          const row = rows[index]
+          const ingestion = statusChecks[index]
+
+          if (isStaleMeetingChat(row, ingestion)) {
+            const { error: updateError } = await supabase
+              .from(CHAT_HISTORY_TABLE)
+              .update({ status: 'failed', messages: [] })
+              .eq('id', row.id)
+              .eq('user_id', userId)
+
+            if (!updateError) {
+              summaryRequestedRef.current.delete(row.id)
+              summarySkippedRef.current.delete(row.id)
             }
-            if (['FAILED', 'NO_TRANSCRIPT'].includes(ingestion?.status)) {
-              return { ...row, status: 'failed' }
-            }
-            return row
-          })
-          .filter((row) => row.status !== 'failed')
+            reconciledRows.push({ ...row, status: 'failed', messages: [] })
+            continue
+          }
+
+          if (ingestion?.status === 'EMBEDDED') {
+            reconciledRows.push({ ...row, status: 'ready' })
+            continue
+          }
+          if (['QUEUED', 'PROCESSING'].includes(ingestion?.status)) {
+            reconciledRows.push({ ...row, status: 'preparing' })
+            continue
+          }
+          if (['FAILED', 'NO_TRANSCRIPT'].includes(ingestion?.status)) {
+            reconciledRows.push({ ...row, status: 'failed' })
+            continue
+          }
+          reconciledRows.push(row)
+        }
+
+        rows = reconciledRows.filter((row) => row.status !== 'failed')
       }
       setMeetingChats(rows)
       setActiveChatId((current) =>
@@ -443,6 +744,8 @@ function App() {
 
     setIsHistoryLoading(false)
   }, [userId])
+
+  loadMeetingChatsRef.current = loadMeetingChats
 
   const upsertMeetingChat = useCallback(
     async ({ meetingId, title, status, messages }) => {
@@ -812,11 +1115,13 @@ function App() {
 
         if (payload.sync_status === 'FAILED' && payload.sync_error && !silent) {
           setCatalogError(payload.sync_error)
+          await loadMeetingChatsRef.current?.()
           return payload
         }
 
         if (payload.sync_error && !silent) {
           setCatalogError(payload.sync_error)
+          await loadMeetingChatsRef.current?.()
           return payload
         }
 
@@ -877,6 +1182,7 @@ function App() {
           setCatalogError(message)
         }
 
+        await loadMeetingChatsRef.current?.()
         return payload
       } catch (error) {
         const isNetworkError = isNetworkFetchError(error)
@@ -965,6 +1271,7 @@ function App() {
       if (!token) return
 
       summaryRequestedRef.current.add(chat.id)
+      markSummarizingChat(chat.id, true)
 
       try {
         const response = await fetch(`${API_BASE_URL}/rag/query`, {
@@ -973,6 +1280,7 @@ function App() {
           body: JSON.stringify({
             query: SUMMARY_PROMPT,
             meeting_id: chat.meetingId,
+            output_format: outputPreference,
           }),
         })
 
@@ -987,12 +1295,9 @@ function App() {
             : 'Summary is not available yet.'
 
         const summaryMessage = {
+          ...buildAssistantMessage(payload, text),
           id: `summary-${crypto.randomUUID()}`,
-          role: 'assistant',
-          text,
           mode: payload.answer_mode || 'extractive_summary',
-          sourceCount: (payload.sources || []).length,
-          createdAt: new Date().toISOString(),
         }
 
         const nextMessages = [...(chat.messages || []), summaryMessage]
@@ -1006,9 +1311,11 @@ function App() {
         if (activeChatIdRef.current === chat.id) {
           setPipelineNotice('Could not generate a meeting summary. You can still ask questions below.')
         }
+      } finally {
+        markSummarizingChat(chat.id, false)
       }
     },
-    [persistChat],
+    [buildAssistantMessage, markSummarizingChat, outputPreference, persistChat],
   )
 
   const markChatReady = useCallback(
@@ -1277,7 +1584,8 @@ function App() {
         return
       }
 
-      setIsSearching(true)
+      setSearchingMeetingChatId(chatId)
+      setSearchingWorkspaceChatId(null)
       setSearchMessage('')
       setPipelineNotice('')
 
@@ -1303,6 +1611,7 @@ function App() {
           body: JSON.stringify({
             query: trimmedQuery,
             meeting_id: meetingId,
+            output_format: outputPreference,
           }),
         })
 
@@ -1316,13 +1625,7 @@ function App() {
             ? payload.answer.trim()
             : 'No grounded answer is available for this meeting yet.'
 
-        const assistantMessage = {
-          id: `assistant-${crypto.randomUUID()}`,
-          role: 'assistant',
-          text: answerText,
-          mode: payload.answer_mode || 'rag_answer',
-          createdAt: new Date().toISOString(),
-        }
+        const assistantMessage = buildAssistantMessage(payload, answerText)
 
         const nextMessages = [...optimisticMessages, assistantMessage]
         await persistChat(chatId, {
@@ -1348,10 +1651,10 @@ function App() {
           ),
         )
       } finally {
-        setIsSearching(false)
+        setSearchingMeetingChatId((current) => (current === chatId ? null : current))
       }
     },
-    [activeChat, activeIngestion?.status, persistChat, query],
+    [activeChat, activeIngestion?.status, buildAssistantMessage, outputPreference, persistChat, query],
   )
 
   const handleWorkspaceSearch = useCallback(
@@ -1367,7 +1670,7 @@ function App() {
         return
       }
 
-      setIsSearching(true)
+      setSearchingMeetingChatId(null)
       setSearchMessage('')
       setPipelineNotice('')
 
@@ -1397,11 +1700,11 @@ function App() {
       }
 
       if (!chat) {
-        setIsSearching(false)
         setSearchMessage('Could not create workspace chat history.')
         return
       }
 
+      setSearchingWorkspaceChatId(chat.id)
       setActiveWorkspaceChatId(chat.id)
       setActiveChatId('')
       setQuery('')
@@ -1412,6 +1715,7 @@ function App() {
           headers: bearerHeaders(token, { 'Content-Type': 'application/json' }),
           body: JSON.stringify({
             query: trimmedQuery,
+            output_format: outputPreference,
           }),
         })
 
@@ -1425,13 +1729,7 @@ function App() {
             ? payload.answer.trim()
             : 'No grounded answer is available from indexed recordings yet.'
 
-        const assistantMessage = {
-          id: `assistant-${crypto.randomUUID()}`,
-          role: 'assistant',
-          text: answerText,
-          mode: payload.answer_mode || 'rag_answer',
-          createdAt: new Date().toISOString(),
-        }
+        const assistantMessage = buildAssistantMessage(payload, answerText)
 
         const nextMessages = [...optimisticMessages, assistantMessage]
         await persistWorkspaceChat(chat.id, {
@@ -1454,10 +1752,10 @@ function App() {
           ),
         )
       } finally {
-        setIsSearching(false)
+        setSearchingWorkspaceChatId((current) => (current === chat.id ? null : current))
       }
     },
-    [activeWorkspaceChat, createWorkspaceChat, persistWorkspaceChat, query],
+    [activeWorkspaceChat, buildAssistantMessage, createWorkspaceChat, outputPreference, persistWorkspaceChat, query],
   )
 
   useEffect(() => {
@@ -1491,6 +1789,11 @@ function App() {
       } else {
         const completed = localStorage.getItem('meetvault-onboarding-completed') === 'true'
         setShowOnboarding(!completed)
+        setOutputPreference('')
+        setHasPreferenceLoaded(false)
+        setIsPreferenceLoading(false)
+        setPreferenceSaving(false)
+        setPreferenceError('')
       }
       if (nextSession?.provider_token) {
         localStorage.setItem(GRAPH_TOKEN_STORAGE_KEY, nextSession.provider_token)
@@ -1711,6 +2014,93 @@ function App() {
     )
   }
 
+  if (!hasPreferenceLoaded || isPreferenceLoading) {
+    return (
+      <main className="login-gate">
+        <section className="login-card" aria-label="Loading MeetVault preferences">
+          <div className="brand-lockup">
+            <div className="brand-mark">M</div>
+            <div>
+              <p className="eyebrow">MeetVault AI</p>
+              <h1>Preparing your workspace</h1>
+            </div>
+          </div>
+          <p>Loading your answer style...</p>
+        </section>
+      </main>
+    )
+  }
+
+  if (!outputPreference) {
+    const previewMeta = getOutputFormatMeta(previewFormat)
+
+    return (
+      <main className="login-gate preference-gate">
+        <section className="login-card preference-card" aria-labelledby="preference-title">
+          <div className="brand-lockup">
+            <div className="brand-mark">M</div>
+            <div>
+              <p className="eyebrow">MeetVault AI</p>
+              <h1 id="preference-title">Choose your answer style</h1>
+            </div>
+          </div>
+          <div className="preference-copy">
+            <p>
+              Pick how MeetVault presents grounded answers from your meeting recordings. Hover a
+              style to preview it, then continue into the workspace.
+            </p>
+          </div>
+          <div className="preference-layout">
+            <div className="preference-grid" role="group" aria-label="Answer style choices">
+              {OUTPUT_FORMATS.map((format) => (
+                <button
+                  className={
+                    previewFormat === format.id
+                      ? 'preference-option active'
+                      : 'preference-option'
+                  }
+                  key={format.id}
+                  type="button"
+                  disabled={preferenceSaving}
+                  onMouseEnter={() => setPreviewFormat(format.id)}
+                  onFocus={() => setPreviewFormat(format.id)}
+                  onClick={() => setPreviewFormat(format.id)}
+                >
+                  <span>{format.label}</span>
+                  <small>{format.description}</small>
+                </button>
+              ))}
+            </div>
+            {previewFormat === 'raw' ? (
+              <div className="raw-view-toggle" role="group" aria-label="Raw display mode">
+                {RAW_VIEW_MODES.map((mode) => (
+                  <button
+                    key={mode.id}
+                    type="button"
+                    className={rawViewMode === mode.id ? 'raw-view-option active' : 'raw-view-option'}
+                    onClick={() => setRawViewMode(mode.id)}
+                  >
+                    {mode.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <FormatPreview format={previewFormat} rawViewMode={rawViewMode} />
+          </div>
+          <button
+            className="auth-button preference-continue"
+            type="button"
+            disabled={preferenceSaving}
+            onClick={() => saveOutputPreference(previewFormat)}
+          >
+            {preferenceSaving ? 'Saving…' : `Continue with ${previewMeta.label}`}
+          </button>
+          {preferenceError ? <p className="feedback error">{preferenceError}</p> : null}
+        </section>
+      </main>
+    )
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Navigation and meeting chats">
@@ -1759,7 +2149,9 @@ function App() {
             {workspaceChats.length === 0 ? (
               <p className="sidebar-note">Ask from Workspace to create a search thread.</p>
             ) : null}
-            {workspaceChats.map((item) => (
+            {workspaceChats.map((item) => {
+              const isThinking = isWorkspaceChatBusy(item.id)
+              return (
               <button
                 className={`history-item ${item.id === activeWorkspaceChatId ? 'active' : ''}`}
                 key={item.id}
@@ -1775,10 +2167,14 @@ function App() {
               >
                 <span className="history-item-row">
                   <span className="history-item-title">{item.title}</span>
+                  {isThinking ? (
+                    <span className="inline-spinner" aria-label="Thinking" />
+                  ) : null}
                 </span>
-                <small>Workspace search</small>
+                <small>{isThinking ? 'Thinking…' : 'Workspace search'}</small>
               </button>
-            ))}
+              )
+            })}
           </div>
         </div>
 
@@ -1793,6 +2189,7 @@ function App() {
             {meetingChats.filter((item) => item.status !== 'failed').map((item) => {
               const ingestion = ingestionByMeeting[item.meetingId]
               const preparing = isChatPreparing(item.status, ingestion?.status)
+              const isThinking = isMeetingChatBusy(item.id)
               return (
                 <button
                   className={`history-item ${item.id === activeChatId ? 'active' : ''}`}
@@ -1809,9 +2206,21 @@ function App() {
                 >
                   <span className="history-item-row">
                     <span className="history-item-title">{item.title}</span>
-                    {preparing ? <span className="inline-spinner" aria-label="Preparing" /> : null}
+                    {isThinking ? (
+                      <span className="inline-spinner" aria-label="Thinking" />
+                    ) : preparing ? (
+                      <span className="inline-spinner" aria-label="Preparing" />
+                    ) : null}
                   </span>
-                  <small>{item.status === 'ready' ? 'Ready' : preparing ? 'Preparing…' : item.status}</small>
+                  <small>
+                    {isThinking
+                      ? 'Thinking…'
+                      : item.status === 'ready'
+                        ? 'Ready'
+                        : preparing
+                          ? 'Preparing…'
+                          : item.status}
+                  </small>
                 </button>
               )
             })}
@@ -1896,16 +2305,18 @@ function App() {
               ingestionStatus={activeIngestion}
               messages={activeChat.messages}
               query={query}
-              isSearching={isSearching}
+              isSearching={isMeetingChatBusy(activeChat.id)}
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
+              outputPreference={outputPreference}
+              rawViewMode={rawViewMode}
               canClearChat={
                 isChatReady(activeChat.status, activeIngestion?.status) &&
                 (activeChat.messages || []).length > 0 &&
-                !isSearching &&
+                !isMeetingChatBusy(activeChat.id) &&
                 !isDeletingChat
               }
-              canDeleteChat={!isSearching && !isDeletingChat}
+              canDeleteChat={!isMeetingChatBusy(activeChat.id) && !isDeletingChat}
               isDeletingChat={isDeletingChat}
               onClearChat={() => clearMeetingChat(activeChat.id)}
               onDeleteChat={() => deleteMeetingChat(activeChat.id)}
@@ -1921,9 +2332,11 @@ function App() {
               autoSyncError={autoSyncError}
               query={query}
               messages={activeWorkspaceChat?.messages || []}
-              isSearching={isSearching}
+              isSearching={isWorkspaceChatBusy(activeWorkspaceChat?.id)}
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
+              outputPreference={outputPreference}
+              rawViewMode={rawViewMode}
               onQueryChange={setQuery}
               onSubmit={handleWorkspaceSearch}
               onRefreshAutoSync={fetchAutoSyncStatus}
@@ -1976,22 +2389,77 @@ function App() {
             </div>
             {settingsView === 'appearance' ? (
               <div className="appearance-panel">
-                <button
-                  className={theme === 'light' ? 'theme-option active' : 'theme-option'}
-                  type="button"
-                  onClick={() => setTheme('light')}
-                >
-                  <span>Light</span>
-                  <small>Default workspace mode</small>
-                </button>
-                <button
-                  className={theme === 'dark' ? 'theme-option active' : 'theme-option'}
-                  type="button"
-                  onClick={() => setTheme('dark')}
-                >
-                  <span>Dark</span>
-                  <small>Low-light review mode</small>
-                </button>
+                <div className="settings-section">
+                  <p className="eyebrow">Theme</p>
+                  <div className="appearance-grid">
+                    <button
+                      className={theme === 'light' ? 'theme-option active' : 'theme-option'}
+                      type="button"
+                      onClick={() => setTheme('light')}
+                    >
+                      <span>Light</span>
+                      <small>Default workspace mode</small>
+                    </button>
+                    <button
+                      className={theme === 'dark' ? 'theme-option active' : 'theme-option'}
+                      type="button"
+                      onClick={() => setTheme('dark')}
+                    >
+                      <span>Dark</span>
+                      <small>Low-light review mode</small>
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-section">
+                  <p className="eyebrow">AI output</p>
+                  <div className="preference-grid compact" role="group" aria-label="AI output style">
+                    {OUTPUT_FORMATS.map((format) => (
+                      <button
+                        className={
+                          outputPreference === format.id
+                            ? 'preference-option active'
+                            : 'preference-option'
+                        }
+                        key={format.id}
+                        type="button"
+                        disabled={preferenceSaving}
+                        onMouseEnter={() => setPreviewFormat(format.id)}
+                        onFocus={() => setPreviewFormat(format.id)}
+                        onClick={() => saveOutputPreference(format.id)}
+                      >
+                        <span>{format.label}</span>
+                        <small>{format.description}</small>
+                      </button>
+                    ))}
+                  </div>
+                  {(previewFormat === 'raw' || outputPreference === 'raw') ? (
+                    <div className="settings-section">
+                      <p className="eyebrow">Raw display</p>
+                      <div className="raw-view-toggle compact" role="group" aria-label="Raw display mode">
+                        {RAW_VIEW_MODES.map((mode) => (
+                          <button
+                            key={mode.id}
+                            type="button"
+                            className={
+                              rawViewMode === mode.id ? 'raw-view-option active' : 'raw-view-option'
+                            }
+                            disabled={preferenceSaving}
+                            onClick={() => saveRawViewMode(mode.id)}
+                          >
+                            <span>{mode.label}</span>
+                            <small>{mode.description}</small>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  <FormatPreview
+                    format={previewFormat || outputPreference}
+                    rawViewMode={rawViewMode}
+                    compact
+                  />
+                  {preferenceError ? <p className="feedback error">{preferenceError}</p> : null}
+                </div>
               </div>
             ) : (
               <div className="mcp-settings-container">

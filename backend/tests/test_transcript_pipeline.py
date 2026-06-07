@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from app.services.chunk_service import ChunkService
 from app.services.ingestion_service import IngestionService
+from app.services.meeting_catalog_service import MeetingCatalogService
 from app.services.onedrive_service import OneDriveService
 from app.services.transcript_service import TranscriptService
 
@@ -513,6 +514,36 @@ We are moving forward.
 
         self.assertEqual(result["results"][0]["status"], "SKIPPED")
         self.assertEqual(result["results"][0]["skip_reason"], "untranscribable_media")
+
+    @patch("app.services.meeting_catalog_service.ChromaService.delete_meeting_embeddings")
+    @patch("app.services.meeting_catalog_service.ChromaService.list_indexed_meetings")
+    def test_revalidate_stale_indices_purges_unmatched_calendar_meeting(
+        self,
+        mock_list_indexed_meetings,
+        mock_delete_meeting_embeddings,
+    ):
+        mock_list_indexed_meetings.return_value = [
+            {
+                "event_id": "evt-tips",
+                "meeting_id": "evt-tips",
+                "title": "6 Tips for Productive 1:1 Meeting",
+            }
+        ]
+
+        result = MeetingCatalogService.revalidate_stale_indices(
+            meetings=[
+                {
+                    "event_id": "evt-tips",
+                    "title": "6 Tips for Productive 1:1 Meeting",
+                    "start_time": "2026-06-01T10:00:00+00:00",
+                }
+            ],
+            recording_event_ids=set(),
+            matched_onedrive_files=[],
+        )
+
+        self.assertEqual(result["stale_indices_purged"], 1)
+        mock_delete_meeting_embeddings.assert_called_once_with("evt-tips")
 
 
 if __name__ == "__main__":
