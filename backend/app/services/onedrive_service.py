@@ -1129,20 +1129,45 @@ class OneDriveService:
 
         matched_files: set[str] = set()
 
-        for meeting in meetings:
-            event_id = meeting.get("event_id") or meeting.get("meeting_id")
-            title = meeting.get("title") or ""
-            if not event_id or not title:
-                continue
+        for file_item in files:
+            file_key = file_item.get("id") or file_item.get("webUrl") or file_item.get("name")
+            file_name = file_item.get("name") or ""
+            file_time = OneDriveService._parse_graph_datetime(
+                file_item.get("lastModifiedDateTime") or file_item.get("createdDateTime"),
+            )
+            candidates: list[tuple[float, str]] = []
+            fallback_event_id: str | None = None
 
-            start_time = meeting.get("start_time") or meeting.get("end_time")
-            for file_item in files:
-                file_key = file_item.get("id") or file_item.get("webUrl") or file_item.get("name")
-                if OneDriveService._file_matches_meeting(file_item, title, start_time):
-                    event_ids.add(event_id)
-                    if file_key:
-                        matched_files.add(file_key)
-                    break
+            for meeting in meetings:
+                event_id = meeting.get("event_id") or meeting.get("meeting_id")
+                title = meeting.get("title") or ""
+                if not event_id or not title or not OneDriveService._titles_match(file_name, title):
+                    continue
+
+                if fallback_event_id is None:
+                    fallback_event_id = event_id
+
+                meeting_time = OneDriveService._parse_graph_datetime(
+                    meeting.get("start_time") or meeting.get("end_time"),
+                )
+                if not file_time or not meeting_time:
+                    continue
+
+                distance_seconds = abs((file_time - meeting_time).total_seconds())
+                if distance_seconds <= timedelta(days=30).total_seconds():
+                    candidates.append((distance_seconds, event_id))
+
+            matched_event_id = None
+            if candidates:
+                candidates.sort(key=lambda item: item[0])
+                matched_event_id = candidates[0][1]
+            elif fallback_event_id:
+                matched_event_id = fallback_event_id
+
+            if matched_event_id:
+                event_ids.add(matched_event_id)
+                if file_key:
+                    matched_files.add(file_key)
 
         unmatched = [
             file_item

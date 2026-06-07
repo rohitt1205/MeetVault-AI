@@ -1,7 +1,7 @@
 export const CHAT_HISTORY_TABLE = 'chat_history'
 
 export const CHAT_SELECT_FIELDS =
-  'id,title,meeting_id,meeting_title,status,messages,created_at'
+  'id,title,query,meeting_id,meeting_title,status,messages,created_at'
 
 /** Legacy NOT NULL column on chat_history (workspace search); meeting chats use messages. */
 export const MEETING_CHAT_LEGACY_QUERY = ''
@@ -47,6 +47,15 @@ export const mapMeetingChatRow = (row) => ({
   title: row.title || row.meeting_title || 'Untitled meeting',
   meetingId: row.meeting_id,
   meetingTitle: row.meeting_title || row.title || 'Untitled meeting',
+  status: row.status || 'ready',
+  messages: Array.isArray(row.messages) ? row.messages : [],
+  createdAt: row.created_at,
+})
+
+export const mapWorkspaceChatRow = (row) => ({
+  id: row.id,
+  title: row.title || row.query || 'Workspace chat',
+  query: row.query || '',
   status: row.status || 'ready',
   messages: Array.isArray(row.messages) ? row.messages : [],
   createdAt: row.created_at,
@@ -99,11 +108,6 @@ export const isChatReady = (chatStatus, ingestionStatus) =>
 export const isChatPreparing = (chatStatus, ingestionStatus) =>
   chatStatus === 'preparing' ||
   ['QUEUED', 'PROCESSING'].includes(ingestionStatus)
-
-export const shouldStartIngestion = (ingestion) => {
-  const status = ingestion?.status
-  return !status || status === 'NOT_STARTED'
-}
 
 export const ingestionStatusUnchanged = (previous, next) =>
   previous?.status === next?.status &&

@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.graph_routes import router as graph_router
 from app.api.mcp_routes import router as mcp_router
 from app.rag.router import router as rag_router
+from app.workers.poller import WorkspaceSyncPoller
 
 load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 load_dotenv()
@@ -41,6 +42,16 @@ app.add_middleware(
 @app.get("/")
 def home():
     return {"message": "MeetVault AI Backend Running"}
+
+
+@app.on_event("startup")
+def start_background_workers():
+    WorkspaceSyncPoller.start()
+
+
+@app.on_event("shutdown")
+def stop_background_workers():
+    WorkspaceSyncPoller.stop()
 
 
 app.include_router(graph_router)

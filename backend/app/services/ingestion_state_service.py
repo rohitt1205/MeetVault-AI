@@ -44,6 +44,22 @@ class IngestionStateService:
         }
 
     @staticmethod
+    def clear_all() -> dict:
+        status_count = len(IngestionStateService._statuses)
+        cancel_count = len(IngestionStateService._cancelled_meetings)
+        IngestionStateService._statuses.clear()
+        IngestionStateService._cancelled_meetings.clear()
+        IngestionStateService._workspace_sync = {
+            "status": "IDLE",
+            "updated_at": None,
+            "message": "Index reset. Open a recording card to prepare transcript embeddings.",
+        }
+        return {
+            "cleared_statuses": status_count,
+            "cleared_cancellations": cancel_count,
+        }
+
+    @staticmethod
     def get_status(meeting_id: str) -> dict:
         return IngestionStateService._statuses.get(
             meeting_id,

@@ -163,6 +163,10 @@ class ChromaService:
         return list(meetings_by_id.values())
 
     @staticmethod
+    def indexed_meeting_count() -> int:
+        return len(ChromaService.list_indexed_meetings())
+
+    @staticmethod
     def delete_meeting_embeddings(meeting_id: str) -> dict:
         if not meeting_id:
             return {"meeting_id": meeting_id, "deleted_chunks": 0}
@@ -174,6 +178,17 @@ class ChromaService:
 
         return {
             "meeting_id": meeting_id,
+            "deleted_chunks": len(chunk_ids),
+        }
+
+    @staticmethod
+    def clear_all_documents() -> dict:
+        data = ChromaService.collection.get()
+        chunk_ids = data.get("ids") or []
+        if chunk_ids:
+            ChromaService.collection.delete(ids=chunk_ids)
+
+        return {
             "deleted_chunks": len(chunk_ids),
         }
 
@@ -226,6 +241,7 @@ class ChromaService:
             "collection_name": CHROMA_COLLECTION_NAME,
             "document_count": ChromaService.collection.count(),
             "indexed_document_count": indexed_count,
+            "indexed_meeting_count": ChromaService.indexed_meeting_count(),
             "legacy_document_count": legacy_count,
             "source_counts": source_counts,
             "sample_chunks": sample_chunks,

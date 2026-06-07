@@ -11,9 +11,11 @@ from app.services.ingestion_service import IngestionService
 from app.services.ingestion_state_service import IngestionStateService
 from app.services.meeting_catalog_service import MeetingCatalogService
 from app.services.meeting_service import MeetingService
+from app.services.post_meeting_notification_service import PostMeetingNotificationService
 from app.services.recording_service import RecordingService
 from app.services.token_diagnostics_service import TokenDiagnosticsService
 from app.services.transcript_service import TranscriptService
+from app.workers.poller import WorkspaceSyncPoller
 
 router = APIRouter()
 
@@ -265,6 +267,21 @@ def start_workspace_sync(
     return IngestionService.start_workspace_sync(access_token, limit=limit)
 
 
+@router.post("/ingestion/auto-sync/register")
+def register_auto_workspace_sync(
+    authorization: str = Header(None),
+    limit: int = Query(20, ge=1, le=50),
+):
+    access_token = get_graph_access_token(authorization)
+    return WorkspaceSyncPoller.register_token(access_token, limit=limit)
+
+
+@router.get("/ingestion/auto-sync/status")
+def get_auto_workspace_sync_status(authorization: str = Header(None)):
+    get_access_token(authorization)
+    return WorkspaceSyncPoller.status()
+
+
 @router.get("/ingestion/recording-assets")
 def discover_recording_assets(
     authorization: str = Header(None),
@@ -321,6 +338,15 @@ def semantic_search(
 @router.get("/ingestion/status/{meeting_id}")
 def get_ingestion_status(meeting_id: str, authorization: str = Header(None)):
     get_access_token(authorization)
+    if ChromaService.has_meeting_embeddings(meeting_id):
+        status = IngestionStateService.get_status(meeting_id)
+        return {
+            **status,
+            "meeting_id": meeting_id,
+            "status": "EMBEDDED",
+            "stage": "ready",
+            "message": status.get("message") or "Meeting is ready for chat.",
+        }
     return IngestionStateService.get_status(meeting_id)
 
 
@@ -336,10 +362,47 @@ def get_workspace_sync_status(authorization: str = Header(None)):
     return IngestionStateService.get_workspace_sync_status()
 
 
+@router.get("/notifications/meetings/{meeting_id}/status")
+def get_post_meeting_notification_status(
+    meeting_id: str,
+    authorization: str = Header(None),
+):
+    get_access_token(authorization)
+    return PostMeetingNotificationService.status_for_meeting(meeting_id)
+
+
+@router.post("/notifications/meetings/{meeting_id}/send")
+def send_post_meeting_notification(
+    meeting_id: str,
+    authorization: str = Header(None),
+    title: str | None = Query(None, description="Optional fallback meeting title."),
+):
+    access_token = get_graph_access_token(authorization)
+    return PostMeetingNotificationService.send_now(
+        access_token,
+        meeting_id,
+        meeting_title=title,
+    )
+
+
 @router.get("/vector-store/status")
 def get_vector_store_status(authorization: str = Header(None)):
     get_access_token(authorization)
     return ChromaService.get_status()
+
+
+@router.delete("/vector-store/reset")
+def reset_vector_store(authorization: str = Header(None)):
+    get_access_token(authorization)
+    chroma_result = ChromaService.clear_all_documents()
+    state_result = IngestionStateService.clear_all()
+    catalog_result = MeetingCatalogService.clear_catalog()
+    return {
+        **chroma_result,
+        **state_result,
+        **catalog_result,
+        "message": "Vector store and ingestion state cleared. Open a recording card to rebuild transcript embeddings.",
+    }
 
 
 @router.get("/auth/diagnostics")

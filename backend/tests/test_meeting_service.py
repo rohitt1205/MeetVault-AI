@@ -105,6 +105,51 @@ class MeetingServiceTests(unittest.TestCase):
             ["latest-meeting", "older-meeting"],
         )
 
+    @patch("app.services.meeting_service.GraphClient.get")
+    def test_get_meeting_event_with_attendees_normalizes_invitees(self, mock_get):
+        mock_get.return_value = {
+            "id": "event-1",
+            "subject": "Customer briefing",
+            "isOnlineMeeting": True,
+            "start": {"dateTime": "2026-06-01T10:00:00+00:00"},
+            "end": {"dateTime": "2026-06-01T11:00:00+00:00"},
+            "organizer": {
+                "emailAddress": {
+                    "name": "Organizer",
+                    "address": "organizer@example.com",
+                },
+            },
+            "attendees": [
+                {
+                    "type": "required",
+                    "emailAddress": {
+                        "name": "Attendee One",
+                        "address": "one@example.com",
+                    },
+                },
+                {
+                    "type": "optional",
+                    "emailAddress": {
+                        "address": "two@example.com",
+                    },
+                },
+            ],
+            "webLink": "https://outlook.office.com/event",
+        }
+
+        meeting = MeetingService.get_meeting_event_with_attendees("token", "event-1")
+
+        self.assertEqual(meeting["title"], "Customer briefing")
+        self.assertEqual(meeting["organizer_email"], "organizer@example.com")
+        self.assertEqual(
+            meeting["attendees"],
+            [
+                {"name": "Attendee One", "email": "one@example.com", "type": "required"},
+                {"name": "two@example.com", "email": "two@example.com", "type": "optional"},
+            ],
+        )
+        self.assertEqual(meeting["web_link"], "https://outlook.office.com/event")
+
     @patch("app.services.meeting_service.MeetingService._lookup_online_meeting_by_join_url")
     @patch("app.services.meeting_service.MeetingService._first_verified_access")
     @patch("app.services.meeting_service.MeetingService.enrich_meeting_from_event")

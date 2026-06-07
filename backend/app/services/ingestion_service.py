@@ -2,6 +2,7 @@ import hashlib
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
 from threading import Lock, Thread
 
 from fastapi import HTTPException
@@ -12,6 +13,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.ingestion_state_service import IngestionStateService
 from app.services.meeting_service import MeetingService
 from app.services.onedrive_service import OneDriveService
+from app.services.post_meeting_notification_service import PostMeetingNotificationService
 from app.services.recording_service import RecordingService
 from app.services.transcript_service import TranscriptService
 
@@ -767,6 +769,11 @@ class IngestionService:
             stored_chunks=storage_result.get("stored_chunks", 0),
             message="Meeting is ready for chat.",
         )
+        notification = PostMeetingNotificationService.queue_after_index(
+            access_token,
+            meeting_id,
+            meeting_title,
+        )
 
         return {
             "meeting_id": meeting_id,
@@ -775,6 +782,7 @@ class IngestionService:
             "source_type": source_type,
             "transcript_turns": len(transcript),
             "chunks": storage_result.get("chunks", 0),
+            "post_meeting_notification": notification,
             **storage_result,
         }
 
@@ -793,6 +801,80 @@ class IngestionService:
             current_item=current_item,
             message=f"Syncing {processed + 1}/{total}: {label}",
         )
+
+    @staticmethod
+    def _matched_drive_items_for_meetings(
+        meetings: list[dict],
+        drive_items: list[dict],
+    ) -> tuple[list[dict], list[dict]]:
+        if not drive_items:
+            return [], []
+
+        if not meetings:
+            return [], drive_items
+
+        matched: list[dict] = []
+        unmatched: list[dict] = []
+
+        for file_item in drive_items:
+            matched_meeting = IngestionService._best_matching_meeting_for_drive_item(
+                meetings,
+                file_item,
+            )
+
+            if not matched_meeting:
+                unmatched.append(file_item)
+                continue
+
+            meeting_id = matched_meeting.get("event_id") or matched_meeting.get("meeting_id")
+            if not meeting_id:
+                unmatched.append(file_item)
+                continue
+
+            matched.append({
+                **file_item,
+                "_catalog_event_id": meeting_id,
+                "_catalog_meeting_title": matched_meeting.get("title"),
+            })
+
+        return matched, unmatched
+
+    @staticmethod
+    def _best_matching_meeting_for_drive_item(
+        meetings: list[dict],
+        file_item: dict,
+    ) -> dict | None:
+        file_name = file_item.get("name") or ""
+        file_time = OneDriveService._parse_graph_datetime(
+            file_item.get("lastModifiedDateTime") or file_item.get("createdDateTime"),
+        )
+
+        candidates: list[tuple[float, dict]] = []
+        fallback: dict | None = None
+
+        for meeting in meetings:
+            title = meeting.get("title") or ""
+            if not title or not OneDriveService._titles_match(file_name, title):
+                continue
+
+            if fallback is None:
+                fallback = meeting
+
+            meeting_time = OneDriveService._parse_graph_datetime(
+                meeting.get("start_time") or meeting.get("end_time"),
+            )
+            if not file_time or not meeting_time:
+                continue
+
+            distance_seconds = abs((file_time - meeting_time).total_seconds())
+            if distance_seconds <= timedelta(days=30).total_seconds():
+                candidates.append((distance_seconds, meeting))
+
+        if candidates:
+            candidates.sort(key=lambda item: item[0])
+            return candidates[0][1]
+
+        return fallback
 
     @staticmethod
     def ingest_recent_meetings(
@@ -818,23 +900,31 @@ class IngestionService:
             max_workers=6 if fast else 3,
         )
 
+        meeting_titles = [meeting.get("title") or "" for meeting in meetings]
         if fast:
-            discovered_assets = OneDriveService.find_recent_recording_assets_fast(
+            discovered_assets = OneDriveService.find_onedrive_videos(
                 access_token,
-                limit=limit,
-                meeting_titles=[meeting.get("title") or "" for meeting in meetings],
+                limit=max(limit * 4, 80),
+                max_shared_pages=5,
+                meeting_titles=meeting_titles,
             )
         else:
-            discovered_assets = OneDriveService.find_recent_recording_assets(
+            discovered_assets = OneDriveService.find_all_recording_assets(
                 access_token,
-                limit=limit,
-                meeting_titles=[meeting.get("title") or "" for meeting in meetings],
+                meeting_titles=meeting_titles,
             )
 
         drive_items = [
             *discovered_assets.get("transcripts", []),
             *discovered_assets.get("videos", []),
         ]
+        discovered_drive_count = len(drive_items)
+        drive_items, unmatched_drive_items = IngestionService._matched_drive_items_for_meetings(
+            meetings,
+            drive_items,
+        )
+        matched_drive_count = len(drive_items)
+        drive_items = drive_items[:limit]
         work_queue: list[tuple[str, object]] = [
             ("graph", recording_summary) for recording_summary in graph_recordings
         ] + [("drive", drive_item) for drive_item in drive_items]
@@ -846,6 +936,10 @@ class IngestionService:
             processed=0,
             total=total_items,
             discovered=len(graph_recordings) + len(drive_items),
+            discovered_drive_assets=discovered_drive_count,
+            matched_drive_assets=matched_drive_count,
+            selected_drive_assets=len(drive_items),
+            unmatched_drive_assets=len(unmatched_drive_items),
             message=(
                 f"Found {total_items} recording(s). Starting ingestion..."
                 if total_items
@@ -894,6 +988,15 @@ class IngestionService:
 
             drive_item = payload
             current_label = drive_item.get("name") or "SharePoint recording"
+            drive_asset_id = (
+                drive_item.get("_catalog_event_id")
+                or IngestionService._drive_asset_id(drive_item)
+            )
+            drive_title = (
+                drive_item.get("_catalog_meeting_title")
+                or drive_item.get("name")
+                or "SharePoint recording"
+            )
             IngestionService._update_workspace_sync_progress(
                 processed=index,
                 total=total_items,
@@ -907,33 +1010,32 @@ class IngestionService:
                     )
                 )
             except HTTPException as exc:
-                asset_id = IngestionService._drive_asset_id(drive_item)
                 status = (
                     "SKIPPED"
                     if IngestionService._is_untranscribable_media_error(exc.detail)
                     else "FAILED"
                 )
                 IngestionStateService.mark_status(
-                    asset_id,
+                    drive_asset_id,
                     status,
-                    meeting_title=drive_item.get("name") or "SharePoint recording",
+                    meeting_title=drive_title,
                     source_type="sharepoint_asset",
                     error_detail=exc.detail,
+                    skip_reason="untranscribable_media" if status == "SKIPPED" else None,
                     message=IngestionService._status_message_for_exception(exc.detail),
                 )
                 results.append({
-                    "meeting_id": asset_id,
-                    "title": drive_item.get("name"),
+                    "meeting_id": drive_asset_id,
+                    "title": drive_title,
                     "status": status,
                     "skip_reason": "untranscribable_media" if status == "SKIPPED" else None,
                     "detail": exc.detail,
                 })
             except Exception as exc:  # pragma: no cover - protects long background sync jobs
-                asset_id = IngestionService._drive_asset_id(drive_item)
                 IngestionStateService.mark_status(
-                    asset_id,
+                    drive_asset_id,
                     "FAILED",
-                    meeting_title=drive_item.get("name") or "SharePoint recording",
+                    meeting_title=drive_title,
                     source_type="sharepoint_asset",
                     error_detail=str(exc),
                     message=(
@@ -942,8 +1044,8 @@ class IngestionService:
                     ),
                 )
                 results.append({
-                    "meeting_id": asset_id,
-                    "title": drive_item.get("name"),
+                    "meeting_id": drive_asset_id,
+                    "title": drive_title,
                     "status": "FAILED",
                     "detail": str(exc),
                 })
@@ -955,8 +1057,7 @@ class IngestionService:
         }
         discovered_count = len([
             *graph_recordings,
-            *discovered_assets.get("transcripts", []),
-            *discovered_assets.get("videos", []),
+            *drive_items,
         ])
 
         embedded_count = sum(1 for item in results if item.get("status") == "EMBEDDED")
@@ -980,6 +1081,10 @@ class IngestionService:
             requested=limit,
             processed=len(results),
             discovered=discovered_count,
+            discovered_drive_assets=discovered_drive_count,
+            matched_drive_assets=matched_drive_count,
+            selected_drive_assets=len(drive_items),
+            unmatched_drive_assets=len(unmatched_drive_items),
             embedded=embedded_count,
             already_indexed=existing_count,
             ignored=ignored_count,
@@ -1067,6 +1172,11 @@ class IngestionService:
             stored_chunks=storage_result.get("stored_chunks", 0),
             message=f"Teams recording embedded successfully. {storage_result.get('stored_chunks', 0)} chunk(s) indexed.",
         )
+        notification = PostMeetingNotificationService.queue_after_index(
+            access_token,
+            asset_id,
+            title,
+        )
 
         return {
             "meeting_id": asset_id,
@@ -1075,13 +1185,33 @@ class IngestionService:
             "source_type": "graph_recording_transcription",
             "transcript_turns": len(transcript),
             "chunks": storage_result.get("chunks", 0),
+            "post_meeting_notification": notification,
             **storage_result,
         }
 
     @staticmethod
     def ingest_drive_item(access_token: str, drive_item: dict) -> dict:
-        asset_id = IngestionService._drive_asset_id(drive_item)
-        title = drive_item.get("name") or "SharePoint recording"
+        asset_id = drive_item.get("_catalog_event_id") or IngestionService._drive_asset_id(drive_item)
+        title = (
+            drive_item.get("_catalog_meeting_title")
+            or drive_item.get("name")
+            or "SharePoint recording"
+        )
+        current_status = IngestionStateService.get_status(asset_id)
+        if (
+            current_status.get("status") in {"SKIPPED", "NO_TRANSCRIPT"}
+            and IngestionService._is_untranscribable_media_error(
+                current_status.get("error_detail") or current_status.get("message")
+            )
+        ):
+            return {
+                "meeting_id": asset_id,
+                "title": title,
+                "status": "SKIPPED",
+                "source_type": current_status.get("source_type") or "sharepoint_asset",
+                "skip_reason": "untranscribable_media",
+                "message": current_status.get("message") or "Recording has no usable audio.",
+            }
 
         if (
             IngestionStateService.is_processed(asset_id)
@@ -1174,6 +1304,11 @@ class IngestionService:
                 f"{storage_result.get('stored_chunks', 0)} chunk(s) indexed."
             ),
         )
+        notification = PostMeetingNotificationService.queue_after_index(
+            access_token,
+            asset_id,
+            title,
+        )
 
         return {
             "meeting_id": asset_id,
@@ -1182,6 +1317,7 @@ class IngestionService:
             "source_type": source_type,
             "transcript_turns": len(transcript),
             "chunks": storage_result.get("chunks", 0),
+            "post_meeting_notification": notification,
             **storage_result,
         }
 
@@ -1241,9 +1377,11 @@ class IngestionService:
             or f"{online_meeting_id}:{meeting.get('event_id')}"
         )
         digest = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:16]
+        meeting_id = meeting.get("event_id")
         return {
-            "asset_id": f"graph-recording-{digest}",
-            "meeting_id": meeting.get("event_id"),
+            "asset_id": meeting_id or f"graph-recording-{digest}",
+            "recording_asset_id": f"graph-recording-{digest}",
+            "meeting_id": meeting_id,
             "meeting_title": meeting.get("title"),
             "online_meeting_id": online_meeting_id,
             "recording_id": recording.get("id"),

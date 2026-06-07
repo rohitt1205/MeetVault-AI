@@ -142,6 +142,36 @@ class MeetingService:
         return MeetingService._normalize_event(event)
 
     @staticmethod
+    def get_meeting_event_with_attendees(access_token: str, event_id: str) -> dict:
+        event = GraphClient.get(
+            endpoint=f"/me/events/{GraphClient.quote(event_id)}",
+            access_token=access_token,
+            params={
+                "$select": (
+                    "id,subject,organizer,attendees,start,end,isOnlineMeeting,"
+                    "onlineMeeting,onlineMeetingUrl,bodyPreview,webLink"
+                )
+            },
+        )
+
+        normalized = MeetingService._normalize_event(event)
+        attendees = []
+        for attendee in event.get("attendees") or []:
+            email_address = attendee.get("emailAddress") or {}
+            address = (email_address.get("address") or "").strip()
+            if not address:
+                continue
+            attendees.append({
+                "name": email_address.get("name") or address,
+                "email": address,
+                "type": attendee.get("type") or "required",
+            })
+
+        normalized["attendees"] = attendees
+        normalized["web_link"] = event.get("webLink")
+        return normalized
+
+    @staticmethod
     def _parse_teams_join_url(join_url: str) -> dict:
         """Extract thread id and organizer Oid from a Teams meetup-join URL."""
         decoded = unquote(unquote(join_url.strip()))

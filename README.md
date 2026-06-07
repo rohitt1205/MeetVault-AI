@@ -19,6 +19,7 @@ The current implementation is focused on the working product flow, ingestion pip
 - Local embeddings stored in ChromaDB.
 - RAG search over stored transcript chunks.
 - Local SLM answer generation through Ollama and Qwen.
+- Post-meeting email brief sent through Microsoft Graph after successful indexing.
 - Chat-style frontend with history, settings, sync status, and topic chips.
 - Supabase-backed chat history support.
 - MCP layer for future and current external tool connections.
@@ -97,6 +98,9 @@ flowchart TB
     Parser --> Chunker["Transcript Chunking"]
     Chunker --> Embeddings["Embedding Service"]
     Embeddings --> Chroma["ChromaDB"]
+    Chroma --> Brief["Post-Meeting Brief"]
+    Brief --> Mail["Microsoft Graph sendMail"]
+    Mail --> Attendees["Organizer and Attendees"]
 
     Frontend --> Query["User Question"]
     Query --> Backend
@@ -125,14 +129,15 @@ The implemented backend pipeline starts after Microsoft authentication and ends 
 4. FastAPI validates that the token is a Microsoft Graph token, not only a Supabase JWT.
 5. The backend uses Microsoft Graph to discover accessible SharePoint, OneDrive, Teams, and calendar-linked meeting assets.
 6. The discovery layer filters for transcript files and real recording assets.
-7. Existing transcript files are parsed directly.
-8. Recording files are downloaded temporarily to the backend and validated as media.
-9. If no transcript exists, the recording is transcribed with faster-whisper.
-10. The transcript is normalized into timestamped speaker turns.
-11. The transcript is split into overlapping chunks with meeting metadata.
-12. Each chunk is embedded with Sentence Transformers.
-13. Chunks, vectors, and metadata are upserted into the `meetvault_transcripts` ChromaDB collection.
-14. The UI shows sync status, indexed chunk counts, and whether assets were embedded, reused, skipped, or failed.
+7. The user opens a catalog card to start preparation for that one recording.
+8. Existing transcript files are parsed directly.
+9. Recording files are downloaded temporarily to the backend and validated as media.
+10. If no transcript exists, the recording is transcribed with faster-whisper.
+11. The transcript is normalized into timestamped speaker turns.
+12. The transcript is split into overlapping chunks with meeting metadata.
+13. Each chunk is embedded with Sentence Transformers.
+14. Chunks, vectors, and metadata are upserted into the `meetvault_transcripts` ChromaDB collection.
+15. The UI shows preparation status, indexed chunk counts, and whether the selected asset was embedded, reused, skipped, or failed.
 
 The transcription model is configured through:
 
@@ -190,9 +195,11 @@ Supported recording/audio files:
 - `.mp3`
 - `.wav`
 
-### 3. Ingestion Pipeline
+### 3. Manual Ingestion Pipeline
 
-When an asset is found, the ingestion service decides how to process it:
+MeetVault uses a manual-first ingestion model by default. The catalog can show recording candidates, but transcript generation and embedding start only when the user opens a recording card.
+
+When a card is opened, the ingestion service decides how to process that selected asset:
 
 - If the asset is a transcript file, the backend reads and normalizes it directly.
 - If the asset is a recording, the backend downloads it temporarily, extracts audio, and transcribes it.
@@ -207,9 +214,43 @@ Each ingestion item is tracked with status values such as:
 - `FAILED`
 - `NO_TRANSCRIPT`
 
-The workspace sync status is surfaced in the frontend so the user can see whether ingestion is running, complete, skipped, or failed.
+The preparation status is surfaced in the frontend so the user can see whether the selected recording is queued, processing, ready, skipped, or failed.
 
-### 4. Transcript Generation
+An optional polling mode exists for future automation, but it is disabled by default:
+
+```env
+MEETVAULT_AUTO_SYNC_ENABLED=false
+VITE_MEETVAULT_AUTO_SYNC_ENABLED=false
+```
+
+### 4. Post-Meeting Email Brief
+
+After a recording is successfully indexed, MeetVault can send a post-meeting brief to the organizer and invited attendees from the calendar event.
+
+The email is sent through Microsoft Graph `sendMail` using the signed-in user's delegated token. It includes:
+
+- Meeting title
+- Short grounded bullet summary from indexed ChromaDB chunks
+- Modern blue HTML card layout
+- `Chat with us` button linked through `MEETVAULT_CHAT_URL`
+
+Duplicate sends are prevented with a runtime notification store. On EC2 this should point to the persistent Docker volume:
+
+```env
+POST_MEETING_EMAIL_ENABLED=true
+POST_MEETING_NOTIFICATION_STORE_PATH=/data/post_meeting_notifications.json
+MEETVAULT_CHAT_URL=http://YOUR_PUBLIC_FRONTEND_URL
+```
+
+Email delivery is implemented but not requested by the default login flow while the team tests other features. To enable post-meeting email briefs, Microsoft OAuth must additionally request:
+
+```text
+Mail.Send
+```
+
+If `Mail.Send` is missing, indexing still succeeds and the notification step is safely skipped.
+
+### 5. Transcript Generation
 
 For recording files, MeetVault uses a local transcription pipeline:
 
@@ -222,7 +263,7 @@ For recording files, MeetVault uses a local transcription pipeline:
 
 This allows MeetVault to work even when a native Microsoft transcript is not available.
 
-### 5. Chunking and Metadata
+### 6. Chunking and Metadata
 
 Normalized transcripts are split into overlapping chunks. Each chunk keeps metadata needed for retrieval, auditability, and future UI filtering:
 
@@ -244,7 +285,7 @@ Source types include Microsoft/SharePoint/OneDrive-backed values such as:
 - `sharepoint_transcript`
 - `sharepoint_recording_transcription`
 
-### 6. Embedding and Vector Storage
+### 7. Embedding and Vector Storage
 
 Each transcript chunk is converted into an embedding and stored in ChromaDB.
 
@@ -263,7 +304,7 @@ ChromaDB stores:
 
 Runtime ChromaDB files are ignored by Git because they are generated data and should not be pushed to the repository.
 
-### 7. RAG Query Flow
+### 8. RAG Query Flow
 
 When the user asks a question:
 
@@ -402,8 +443,13 @@ MS_CLIENT_ID=
 MS_CLIENT_SECRET=
 MS_TENANT_ID=
 GRAPH_BASE_URL=https://graph.microsoft.com/v1.0
+MEETVAULT_AUTO_SYNC_ENABLED=false
+POST_MEETING_EMAIL_ENABLED=true
+POST_MEETING_NOTIFICATION_STORE_PATH=./post_meeting_notifications.json
+MEETVAULT_CHAT_URL=http://127.0.0.1:5173
 
 VITE_API_BASE_URL=http://localhost:8000
+VITE_MEETVAULT_AUTO_SYNC_ENABLED=false
 VITE_SUPABASE_URL=
 VITE_SUPABASE_PUBLISHABLE_KEY=
 
@@ -530,15 +576,13 @@ Backend health response:
 - Some Teams/SharePoint recordings may not contain an audio stream and are skipped.
 - Large recordings may take several minutes to download, transcribe, chunk, embed, and store.
 - ChromaDB is currently local runtime storage.
-- Polling/webhook-based automatic ingestion is planned but not finalized.
+- Webhook-based automatic ingestion is planned but not finalized.
 - MCP tool coverage is still being expanded.
 
 ## Future Improvements
 
 - Microsoft Graph webhook support for new recording events.
-- Background polling worker for periodic workspace sync.
 - Job queue for long-running ingestion tasks.
-- MCP notifications after ingestion completes.
 - More MCP tools for email, calendar, Teams, Slack, and ticketing workflows.
 - More advanced RAG evaluation and answer quality scoring.
 - User-specific vector-store filtering and access isolation.
