@@ -5,6 +5,7 @@ from fastapi import HTTPException
 
 from app.services.chunk_service import ChunkService
 from app.services.ingestion_service import IngestionService
+from app.services.onedrive_service import OneDriveService
 from app.services.transcript_service import TranscriptService
 
 
@@ -372,12 +373,12 @@ We are moving forward.
 
     @patch("app.services.ingestion_service.MeetingService.get_recent_meetings")
     @patch("app.services.ingestion_service.IngestionService.ingest_drive_item")
-    @patch("app.services.ingestion_service.OneDriveService.find_recent_recording_assets_fast")
+    @patch("app.services.ingestion_service.OneDriveService.find_onedrive_videos")
     @patch("app.services.ingestion_service.IngestionService.discover_graph_recordings")
     def test_ingest_recent_meetings_processes_recorded_assets_without_calendar_failures(
         self,
         mock_discover_graph_recordings,
-        mock_find_recent_recording_assets,
+        mock_find_onedrive_videos,
         mock_ingest_drive_item,
         mock_get_recent_meetings,
     ):
@@ -385,9 +386,9 @@ We are moving forward.
             {"event_id": "meeting-1", "title": "LWC Training"}
         ]
         mock_discover_graph_recordings.return_value = []
-        mock_find_recent_recording_assets.return_value = {
+        mock_find_onedrive_videos.return_value = {
             "transcripts": [],
-            "videos": [{"id": "video-1", "name": "Recorded Meeting.mp4"}],
+            "videos": [{"id": "video-1", "name": "LWC Training Recording.mp4"}],
         }
         mock_ingest_drive_item.side_effect = RuntimeError("tuple index out of range")
 
@@ -396,11 +397,45 @@ We are moving forward.
         self.assertEqual(result["processed"], 1)
         self.assertEqual(result["results"][0]["status"], "FAILED")
         mock_get_recent_meetings.assert_called_once()
-        mock_find_recent_recording_assets.assert_called_once_with(
+        mock_find_onedrive_videos.assert_called_once_with(
             "access-token",
-            limit=5,
+            limit=80,
+            max_shared_pages=5,
             meeting_titles=["LWC Training"],
         )
+
+    def test_drive_recording_matches_nearest_recurring_meeting(self):
+        meetings = [
+            {
+                "event_id": "crma-june-05",
+                "title": "CRMA",
+                "start_time": "2026-06-05T12:00:00Z",
+            },
+            {
+                "event_id": "crma-june-04",
+                "title": "CRMA",
+                "start_time": "2026-06-04T12:00:00Z",
+            },
+        ]
+        video = {
+            "id": "video-1",
+            "name": "CRMA-20260604_120052-Meeting Recording.mp4",
+            "createdDateTime": "2026-06-04T12:00:52Z",
+        }
+
+        matched, unmatched = IngestionService._matched_drive_items_for_meetings(
+            meetings,
+            [video],
+        )
+        event_ids, catalog_unmatched = OneDriveService.match_recording_assets_to_meetings(
+            meetings,
+            {"transcripts": [], "videos": [video]},
+        )
+
+        self.assertEqual(matched[0]["_catalog_event_id"], "crma-june-04")
+        self.assertEqual(unmatched, [])
+        self.assertEqual(event_ids, {"crma-june-04"})
+        self.assertEqual(catalog_unmatched, [])
 
     @patch("app.services.ingestion_service.IngestionStateService.is_processed", return_value=False)
     @patch("app.services.ingestion_service.ChromaService.has_meeting_embeddings", return_value=False)
@@ -446,7 +481,7 @@ We are moving forward.
         mock_store_transcript.assert_called_once()
 
     @patch("app.services.ingestion_service.IngestionService.ingest_drive_item")
-    @patch("app.services.ingestion_service.OneDriveService.find_recent_recording_assets_fast")
+    @patch("app.services.ingestion_service.OneDriveService.find_onedrive_videos")
     @patch("app.services.ingestion_service.IngestionService.ingest_graph_recording")
     @patch("app.services.ingestion_service.IngestionService.discover_graph_recordings")
     @patch("app.services.ingestion_service.MeetingService.get_recent_meetings")
@@ -455,7 +490,7 @@ We are moving forward.
         mock_get_recent_meetings,
         mock_discover_graph_recordings,
         mock_ingest_graph_recording,
-        mock_find_recent_recording_assets,
+        mock_find_onedrive_videos,
         _mock_ingest_drive_item,
     ):
         mock_get_recent_meetings.return_value = [
@@ -472,7 +507,7 @@ We are moving forward.
             status_code=422,
             detail={"message": "Recording does not contain an audio stream to transcribe."},
         )
-        mock_find_recent_recording_assets.return_value = {"transcripts": [], "videos": []}
+        mock_find_onedrive_videos.return_value = {"transcripts": [], "videos": []}
 
         result = IngestionService.ingest_recent_meetings("access-token", limit=20)
 

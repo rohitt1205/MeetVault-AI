@@ -224,6 +224,8 @@ __marimo__/
 /backend/chroma_db/
 /backend/chroma_db*/
 /backend/mcp_connections.json
+/backend/post_meeting_notifications.json
+/post_meeting_notifications.json
 /chroma_db/
 
 # JavaScript / frontend
@@ -239,6 +241,7 @@ lerna-debug.log*
 
 # Editor and OS files
 .idea/
+.vscode/
 .DS_Store
 *.suo
 *.ntvs*

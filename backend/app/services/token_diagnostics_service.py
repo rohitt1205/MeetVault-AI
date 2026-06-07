@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -55,18 +56,27 @@ class TokenDiagnosticsService:
         )
         audience = claims.get("aud")
         is_graph_token = audience in GRAPH_AUDIENCES
+        expires_at = None
+        if claims.get("exp"):
+            expires_at = datetime.fromtimestamp(
+                int(claims["exp"]),
+                tz=timezone.utc,
+            ).isoformat()
 
         return {
             "valid_jwt": True,
             "audience": audience,
             "tenant_id": claims.get("tid"),
+            "user_id": claims.get("oid") or claims.get("sub"),
             "user_principal_name": claims.get("upn") or claims.get("unique_name"),
+            "expires_at": expires_at,
             "scopes": scopes,
             "missing_scopes": missing_scopes,
             "is_graph_token": is_graph_token,
             "can_fetch_meetings": is_graph_token and "Calendars.Read" in scopes,
             "can_fetch_files": is_graph_token and "Files.Read" in scopes,
             "can_fetch_online_meetings": is_graph_token and "OnlineMeetings.Read" in scopes,
+            "can_send_mail": is_graph_token and "Mail.Send" in scopes,
             "can_auto_sync": (
                 is_graph_token
                 and
