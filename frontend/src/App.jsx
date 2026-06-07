@@ -25,6 +25,7 @@ import {
   isChatPreparing,
   isChatReady,
   mapMeetingChatRow,
+  mapRagCitationsForUi,
   mapWorkspaceChatRow,
   MEETING_CHAT_LEGACY_QUERY,
   sanitizeChatPatch,
@@ -231,7 +232,9 @@ function App() {
   const autoSyncRegisteredTokenRef = useRef('')
 
   const [query, setQuery] = useState('')
-  const [isSearching, setIsSearching] = useState(false)
+  const [searchingMeetingChatId, setSearchingMeetingChatId] = useState(null)
+  const [searchingWorkspaceChatId, setSearchingWorkspaceChatId] = useState(null)
+  const [summarizingChatIds, setSummarizingChatIds] = useState([])
   const [isDeletingChat, setIsDeletingChat] = useState(false)
   const [searchMessage, setSearchMessage] = useState('')
   const [pipelineNotice, setPipelineNotice] = useState('')
@@ -263,6 +266,29 @@ function App() {
   const activeIngestion = activeChat?.meetingId
     ? ingestionByMeeting[activeChat.meetingId]
     : null
+
+  const isMeetingChatBusy = useCallback(
+    (chatId) =>
+      Boolean(chatId) &&
+      (searchingMeetingChatId === chatId || summarizingChatIds.includes(chatId)),
+    [searchingMeetingChatId, summarizingChatIds],
+  )
+
+  const isWorkspaceChatBusy = useCallback(
+    (chatId) => Boolean(chatId) && searchingWorkspaceChatId === chatId,
+    [searchingWorkspaceChatId],
+  )
+
+  const markSummarizingChat = useCallback((chatId, busy) => {
+    if (!chatId) return
+    setSummarizingChatIds((current) => {
+      const isBusy = current.includes(chatId)
+      if (busy) {
+        return isBusy ? current : [...current, chatId]
+      }
+      return isBusy ? current.filter((id) => id !== chatId) : current
+    })
+  }, [])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -348,16 +374,20 @@ function App() {
   )
 
   const buildAssistantMessage = useCallback(
-    (payload, answerText) => ({
-      id: `assistant-${crypto.randomUUID()}`,
-      role: 'assistant',
-      text: answerText,
-      mode: payload.answer_mode || 'rag_answer',
-      outputFormat: normalizeOutputFormat(payload.output_format || outputPreference),
-      rawViewMode,
-      sourceCount: (payload.sources || payload.results || []).length,
-      createdAt: new Date().toISOString(),
-    }),
+    (payload, answerText) => {
+      const citations = mapRagCitationsForUi(payload.citations || payload.sources || [])
+      return {
+        id: `assistant-${crypto.randomUUID()}`,
+        role: 'assistant',
+        text: answerText,
+        mode: payload.answer_mode || 'rag_answer',
+        outputFormat: normalizeOutputFormat(payload.output_format || outputPreference),
+        rawViewMode,
+        sources: citations,
+        sourceCount: citations.length,
+        createdAt: new Date().toISOString(),
+      }
+    },
     [outputPreference, rawViewMode],
   )
 
@@ -1158,6 +1188,7 @@ function App() {
       if (!token) return
 
       summaryRequestedRef.current.add(chat.id)
+      markSummarizingChat(chat.id, true)
 
       try {
         const response = await fetch(`${API_BASE_URL}/rag/query`, {
@@ -1197,9 +1228,11 @@ function App() {
         if (activeChatIdRef.current === chat.id) {
           setPipelineNotice('Could not generate a meeting summary. You can still ask questions below.')
         }
+      } finally {
+        markSummarizingChat(chat.id, false)
       }
     },
-    [buildAssistantMessage, outputPreference, persistChat],
+    [buildAssistantMessage, markSummarizingChat, outputPreference, persistChat],
   )
 
   const markChatReady = useCallback(
@@ -1468,7 +1501,8 @@ function App() {
         return
       }
 
-      setIsSearching(true)
+      setSearchingMeetingChatId(chatId)
+      setSearchingWorkspaceChatId(null)
       setSearchMessage('')
       setPipelineNotice('')
 
@@ -1534,7 +1568,7 @@ function App() {
           ),
         )
       } finally {
-        setIsSearching(false)
+        setSearchingMeetingChatId((current) => (current === chatId ? null : current))
       }
     },
     [activeChat, activeIngestion?.status, buildAssistantMessage, outputPreference, persistChat, query],
@@ -1553,7 +1587,7 @@ function App() {
         return
       }
 
-      setIsSearching(true)
+      setSearchingMeetingChatId(null)
       setSearchMessage('')
       setPipelineNotice('')
 
@@ -1583,11 +1617,11 @@ function App() {
       }
 
       if (!chat) {
-        setIsSearching(false)
         setSearchMessage('Could not create workspace chat history.')
         return
       }
 
+      setSearchingWorkspaceChatId(chat.id)
       setActiveWorkspaceChatId(chat.id)
       setActiveChatId('')
       setQuery('')
@@ -1635,7 +1669,7 @@ function App() {
           ),
         )
       } finally {
-        setIsSearching(false)
+        setSearchingWorkspaceChatId((current) => (current === chat.id ? null : current))
       }
     },
     [activeWorkspaceChat, buildAssistantMessage, createWorkspaceChat, outputPreference, persistWorkspaceChat, query],
@@ -1957,7 +1991,9 @@ function App() {
             {workspaceChats.length === 0 ? (
               <p className="sidebar-note">Ask from Workspace to create a search thread.</p>
             ) : null}
-            {workspaceChats.map((item) => (
+            {workspaceChats.map((item) => {
+              const isThinking = isWorkspaceChatBusy(item.id)
+              return (
               <button
                 className={`history-item ${item.id === activeWorkspaceChatId ? 'active' : ''}`}
                 key={item.id}
@@ -1973,10 +2009,14 @@ function App() {
               >
                 <span className="history-item-row">
                   <span className="history-item-title">{item.title}</span>
+                  {isThinking ? (
+                    <span className="inline-spinner" aria-label="Thinking" />
+                  ) : null}
                 </span>
-                <small>Workspace search</small>
+                <small>{isThinking ? 'Thinking…' : 'Workspace search'}</small>
               </button>
-            ))}
+              )
+            })}
           </div>
         </div>
 
@@ -1991,6 +2031,7 @@ function App() {
             {meetingChats.filter((item) => item.status !== 'failed').map((item) => {
               const ingestion = ingestionByMeeting[item.meetingId]
               const preparing = isChatPreparing(item.status, ingestion?.status)
+              const isThinking = isMeetingChatBusy(item.id)
               return (
                 <button
                   className={`history-item ${item.id === activeChatId ? 'active' : ''}`}
@@ -2007,9 +2048,21 @@ function App() {
                 >
                   <span className="history-item-row">
                     <span className="history-item-title">{item.title}</span>
-                    {preparing ? <span className="inline-spinner" aria-label="Preparing" /> : null}
+                    {isThinking ? (
+                      <span className="inline-spinner" aria-label="Thinking" />
+                    ) : preparing ? (
+                      <span className="inline-spinner" aria-label="Preparing" />
+                    ) : null}
                   </span>
-                  <small>{item.status === 'ready' ? 'Ready' : preparing ? 'Preparing…' : item.status}</small>
+                  <small>
+                    {isThinking
+                      ? 'Thinking…'
+                      : item.status === 'ready'
+                        ? 'Ready'
+                        : preparing
+                          ? 'Preparing…'
+                          : item.status}
+                  </small>
                 </button>
               )
             })}
@@ -2094,7 +2147,7 @@ function App() {
               ingestionStatus={activeIngestion}
               messages={activeChat.messages}
               query={query}
-              isSearching={isSearching}
+              isSearching={isMeetingChatBusy(activeChat.id)}
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
               outputPreference={outputPreference}
@@ -2102,10 +2155,10 @@ function App() {
               canClearChat={
                 isChatReady(activeChat.status, activeIngestion?.status) &&
                 (activeChat.messages || []).length > 0 &&
-                !isSearching &&
+                !isMeetingChatBusy(activeChat.id) &&
                 !isDeletingChat
               }
-              canDeleteChat={!isSearching && !isDeletingChat}
+              canDeleteChat={!isMeetingChatBusy(activeChat.id) && !isDeletingChat}
               isDeletingChat={isDeletingChat}
               onClearChat={() => clearMeetingChat(activeChat.id)}
               onDeleteChat={() => deleteMeetingChat(activeChat.id)}
@@ -2121,7 +2174,7 @@ function App() {
               autoSyncError={autoSyncError}
               query={query}
               messages={activeWorkspaceChat?.messages || []}
-              isSearching={isSearching}
+              isSearching={isWorkspaceChatBusy(activeWorkspaceChat?.id)}
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
               outputPreference={outputPreference}

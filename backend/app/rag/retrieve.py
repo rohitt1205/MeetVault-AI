@@ -1,6 +1,7 @@
 import re
 
 from app.mcp.mcp_manager import MCPManager
+from app.rag.citations import build_citations
 from app.rag.llm import generate_answer, generate_conversational_answer
 from app.rag.prompts import CONVERSATIONAL_PROMPT, build_rag_prompt, normalize_output_format
 from app.services.answer_service import AnswerService
@@ -190,6 +191,12 @@ def _is_not_found_answer(answer: str) -> bool:
     )
 
 
+def _attach_citations(payload: dict, *, limit: int = 5, query: str | None = None) -> dict:
+    sources = payload.get("sources") or []
+    payload["citations"] = build_citations(sources, limit=limit, query=query)
+    return payload
+
+
 def _meeting_title_from_sources(sources: list[dict]) -> str:
     for source in sources:
         title = (source.get("metadata") or {}).get("meeting_title")
@@ -266,13 +273,13 @@ def _generate_conversational_response(user_query: str, sources: list[dict]) -> d
         )
         answer_mode = "conversational_fallback"
 
-    return {
+    return _attach_citations({
         "query": user_query,
         "answer": answer,
         "answer_mode": answer_mode,
         "llm_error": llm_error,
         "sources": sources[:2],
-    }
+    }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)
 
 
 def _append_jira_context(user_query: str, user_key: str, sources: list[dict]) -> tuple[str, list[dict]]:
@@ -312,6 +319,14 @@ def retrieve_and_answer(
     """
     resolved_format = normalize_output_format(output_format)
     is_summary = AnswerService.has_summary_intent(user_query)
+    query_topics = AnswerService.extract_query_topics(user_query)
+    if is_summary:
+        rank_limit = 8
+    elif len(query_topics) >= 2:
+        rank_limit = min(12, max(8, len(query_topics) * 4))
+    else:
+        rank_limit = 5
+
     query_embedding = EmbeddingService.generate_query_embedding(user_query)
 
     results = ChromaService.query_embeddings(
@@ -328,12 +343,12 @@ def retrieve_and_answer(
     retrieved_ids = results.get("ids", [[]])[0]
 
     if not retrieved_documents:
-        return {
+        return _attach_citations({
             "query": user_query,
             "answer": "I don't have any meeting transcripts to answer that question.",
             "answer_mode": "no_context",
             "sources": [],
-        }
+        })
 
     candidate_sources = [
         _source_from_result(
@@ -348,13 +363,13 @@ def retrieve_and_answer(
     sources = _rank_sources(
         user_query,
         [source for source in candidate_sources if _is_queryable_source(source)],
-        limit=8 if is_summary else 5,
+        limit=rank_limit,
     )
 
     jira_context, sources = _append_jira_context(user_query, user_key, sources)
 
     if not sources:
-        return {
+        return _attach_citations({
             "query": user_query,
             "answer": (
                 "I found embeddings in ChromaDB, but none from Microsoft Graph, "
@@ -362,7 +377,7 @@ def retrieve_and_answer(
             ),
             "answer_mode": "no_microsoft_context",
             "sources": [],
-        }
+        })
 
     if AnswerService.is_vague_or_social_query(user_query):
         return _generate_conversational_response(user_query, sources)
@@ -419,11 +434,11 @@ def retrieve_and_answer(
             )
             answer_mode = "clarification"
 
-    return {
+    return _attach_citations({
         "query": user_query,
         "answer": answer,
         "answer_mode": answer_mode,
         "output_format": resolved_format,
         "llm_error": llm_error,
         "sources": sources,
-    }
+    }, limit=AnswerService.citation_limit_for_query(user_query), query=user_query)

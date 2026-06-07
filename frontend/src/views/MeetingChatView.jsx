@@ -149,6 +149,7 @@ export default function MeetingChatView({
                           format={turn.outputFormat || outputPreference}
                           rawViewMode={turn.rawViewMode || rawViewMode}
                           sourceCount={turn.sourceCount}
+                          sources={turn.sources || []}
                         />
                       </div>
                     </article>
