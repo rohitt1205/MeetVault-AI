@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import ChatMarkdown from '../components/ChatMarkdown'
+import AnswerPresentation from '../components/AnswerPresentation'
 import {
   ingestionProgressPercent,
   ingestionStageLabel,
@@ -40,6 +40,7 @@ export default function MeetingChatView({
   isSearching,
   searchMessage,
   pipelineNotice,
+  outputPreference,
   onQueryChange,
   onSubmit,
   onSuggestedQuery,
@@ -155,7 +156,11 @@ export default function MeetingChatView({
                     <article className="message-row assistant">
                       <div className="message-bubble assistant">
                         <p className="message-label">{answerEyebrowForMode(turn.mode)}</p>
-                        <ChatMarkdown text={turn.text} />
+                        <AnswerPresentation
+                          text={turn.text}
+                          mode={turn.mode}
+                          format={outputPreference}
+                        />
                       </div>
                     </article>
                   )}

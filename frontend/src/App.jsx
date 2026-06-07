@@ -5,6 +5,12 @@ import MeetingsGridView from './views/MeetingsGridView'
 import MeetingChatView from './views/MeetingChatView'
 import WorkspaceLanding from './views/WorkspaceLanding'
 import {
+  DEFAULT_OUTPUT_FORMAT,
+  OUTPUT_FORMATS,
+  isValidOutputFormat,
+  outputPreferenceStorageKey,
+} from './utils/outputPreferences'
+import {
   CHAT_HISTORY_TABLE,
   CHAT_SELECT_FIELDS,
   ingestionStatusUnchanged,
@@ -141,6 +147,11 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [settingsView, setSettingsView] = useState('appearance')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_STORAGE_KEY) || 'light')
+  const [outputPreference, setOutputPreference] = useState('')
+  const [hasPreferenceLoaded, setHasPreferenceLoaded] = useState(false)
+  const [isPreferenceLoading, setIsPreferenceLoading] = useState(false)
+  const [preferenceSaving, setPreferenceSaving] = useState(false)
+  const [preferenceError, setPreferenceError] = useState('')
 
   const [activeNav, setActiveNav] = useState('workspace')
   const [workspaceChats, setWorkspaceChats] = useState([])
@@ -209,6 +220,122 @@ function App() {
     document.documentElement.dataset.theme = theme
     localStorage.setItem(THEME_STORAGE_KEY, theme)
   }, [theme])
+
+  const saveOutputPreference = useCallback(
+    async (format) => {
+      const nextFormat = isValidOutputFormat(format) ? format : DEFAULT_OUTPUT_FORMAT
+      setPreferenceSaving(true)
+      setPreferenceError('')
+      setOutputPreference(nextFormat)
+
+      if (userId) {
+        localStorage.setItem(outputPreferenceStorageKey(userId), nextFormat)
+      }
+
+      try {
+        if (userId) {
+          const { error } = await supabase
+            .from('user_preferences')
+            .upsert(
+              {
+                user_id: userId,
+                output_format: nextFormat,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'user_id' },
+            )
+
+          if (error) throw error
+        }
+      } catch (error) {
+        console.error('Output preference save failed:', error)
+        setPreferenceError(
+          'Saved on this device. Run supabase/migrations/005_user_preferences.sql to sync it to Supabase.',
+        )
+      } finally {
+        setHasPreferenceLoaded(true)
+        setPreferenceSaving(false)
+      }
+    },
+    [userId],
+  )
+
+  useEffect(() => {
+    if (!userId) {
+      return undefined
+    }
+
+    let cancelled = false
+    const storageKey = outputPreferenceStorageKey(userId)
+    const localFormat = localStorage.getItem(storageKey)
+
+    const loadPreference = async () => {
+      setIsPreferenceLoading(true)
+      setHasPreferenceLoaded(false)
+      setPreferenceError('')
+
+      try {
+        const { data, error } = await supabase
+          .from('user_preferences')
+          .select('output_format')
+          .eq('user_id', userId)
+          .maybeSingle()
+
+        if (cancelled) return
+        if (error) throw error
+
+        if (isValidOutputFormat(data?.output_format)) {
+          setOutputPreference(data.output_format)
+          localStorage.setItem(storageKey, data.output_format)
+          return
+        }
+
+        if (isValidOutputFormat(localFormat)) {
+          setOutputPreference(localFormat)
+          const { error: syncError } = await supabase
+            .from('user_preferences')
+            .upsert(
+              {
+                user_id: userId,
+                output_format: localFormat,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: 'user_id' },
+            )
+          if (syncError && !cancelled) {
+            setPreferenceError(
+              'Preference is saved on this device. Supabase sync is not ready yet.',
+            )
+          }
+          return
+        }
+
+        setOutputPreference('')
+      } catch (error) {
+        if (cancelled) return
+        console.error('Output preference load failed:', error)
+        if (isValidOutputFormat(localFormat)) {
+          setOutputPreference(localFormat)
+        } else {
+          setOutputPreference('')
+        }
+        setPreferenceError(
+          'Preference is stored locally until the Supabase preferences migration is applied.',
+        )
+      } finally {
+        if (!cancelled) {
+          setHasPreferenceLoaded(true)
+          setIsPreferenceLoading(false)
+        }
+      }
+    }
+
+    void loadPreference()
+
+    return () => {
+      cancelled = true
+    }
+  }, [userId])
 
   const userProfile = useMemo(() => {
     const metadata = user?.user_metadata || {}
@@ -1399,6 +1526,11 @@ function App() {
         autoSyncRegisteredTokenRef.current = ''
         setAutoSyncStatus(null)
         setAutoSyncError('')
+        setOutputPreference('')
+        setHasPreferenceLoaded(false)
+        setIsPreferenceLoading(false)
+        setPreferenceSaving(false)
+        setPreferenceError('')
       }
       setSession(nextSession)
     })
@@ -1547,6 +1679,60 @@ function App() {
           <button className="auth-button full-width" type="button" onClick={handleAuth}>
             Continue with Microsoft
           </button>
+        </section>
+      </main>
+    )
+  }
+
+  if (!hasPreferenceLoaded || isPreferenceLoading) {
+    return (
+      <main className="login-gate">
+        <section className="login-card" aria-label="Loading MeetVault preferences">
+          <div className="brand-lockup">
+            <div className="brand-mark">M</div>
+            <div>
+              <p className="eyebrow">MeetVault AI</p>
+              <h1>Preparing your workspace</h1>
+            </div>
+          </div>
+          <p>Loading your answer style...</p>
+        </section>
+      </main>
+    )
+  }
+
+  if (!outputPreference) {
+    return (
+      <main className="login-gate preference-gate">
+        <section className="login-card preference-card" aria-labelledby="preference-title">
+          <div className="brand-lockup">
+            <div className="brand-mark">M</div>
+            <div>
+              <p className="eyebrow">MeetVault AI</p>
+              <h1 id="preference-title">Choose your answer style</h1>
+            </div>
+          </div>
+          <div className="preference-copy">
+            <p>
+              Pick how MeetVault should present answers from indexed meeting knowledge. You can
+              change this later in Settings.
+            </p>
+          </div>
+          <div className="preference-grid" role="group" aria-label="Answer style choices">
+            {OUTPUT_FORMATS.map((format) => (
+              <button
+                className="preference-option"
+                key={format.id}
+                type="button"
+                disabled={preferenceSaving}
+                onClick={() => saveOutputPreference(format.id)}
+              >
+                <span>{format.label}</span>
+                <small>{format.description}</small>
+              </button>
+            ))}
+          </div>
+          {preferenceError ? <p className="feedback error">{preferenceError}</p> : null}
         </section>
       </main>
     )
@@ -1740,6 +1926,7 @@ function App() {
               isSearching={isSearching}
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
+              outputPreference={outputPreference}
               canClearChat={
                 isChatReady(activeChat.status, activeIngestion?.status) &&
                 (activeChat.messages || []).length > 0 &&
@@ -1765,6 +1952,7 @@ function App() {
               isSearching={isSearching}
               searchMessage={searchMessage}
               pipelineNotice={pipelineNotice}
+              outputPreference={outputPreference}
               onQueryChange={setQuery}
               onSubmit={handleWorkspaceSearch}
               onRefreshAutoSync={fetchAutoSyncStatus}
@@ -1817,22 +2005,49 @@ function App() {
             </div>
             {settingsView === 'appearance' ? (
               <div className="appearance-panel">
-                <button
-                  className={theme === 'light' ? 'theme-option active' : 'theme-option'}
-                  type="button"
-                  onClick={() => setTheme('light')}
-                >
-                  <span>Light</span>
-                  <small>Default workspace mode</small>
-                </button>
-                <button
-                  className={theme === 'dark' ? 'theme-option active' : 'theme-option'}
-                  type="button"
-                  onClick={() => setTheme('dark')}
-                >
-                  <span>Dark</span>
-                  <small>Low-light review mode</small>
-                </button>
+                <div className="settings-section">
+                  <p className="eyebrow">Theme</p>
+                  <div className="appearance-grid">
+                    <button
+                      className={theme === 'light' ? 'theme-option active' : 'theme-option'}
+                      type="button"
+                      onClick={() => setTheme('light')}
+                    >
+                      <span>Light</span>
+                      <small>Default workspace mode</small>
+                    </button>
+                    <button
+                      className={theme === 'dark' ? 'theme-option active' : 'theme-option'}
+                      type="button"
+                      onClick={() => setTheme('dark')}
+                    >
+                      <span>Dark</span>
+                      <small>Low-light review mode</small>
+                    </button>
+                  </div>
+                </div>
+                <div className="settings-section">
+                  <p className="eyebrow">AI output</p>
+                  <div className="preference-grid compact" role="group" aria-label="AI output style">
+                    {OUTPUT_FORMATS.map((format) => (
+                      <button
+                        className={
+                          outputPreference === format.id
+                            ? 'preference-option active'
+                            : 'preference-option'
+                        }
+                        key={format.id}
+                        type="button"
+                        disabled={preferenceSaving}
+                        onClick={() => saveOutputPreference(format.id)}
+                      >
+                        <span>{format.label}</span>
+                        <small>{format.description}</small>
+                      </button>
+                    ))}
+                  </div>
+                  {preferenceError ? <p className="feedback error">{preferenceError}</p> : null}
+                </div>
               </div>
             ) : (
               <div className="mcp-settings-container">

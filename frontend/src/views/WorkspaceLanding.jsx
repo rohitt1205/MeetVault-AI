@@ -1,4 +1,4 @@
-import ChatMarkdown from '../components/ChatMarkdown'
+import AnswerPresentation from '../components/AnswerPresentation'
 
 const formatDateTime = (value) => {
   if (!value) return 'Not yet'
@@ -46,6 +46,7 @@ export default function WorkspaceLanding({
   isSearching = false,
   searchMessage = '',
   pipelineNotice = '',
+  outputPreference,
   onQueryChange,
   onSubmit,
   onRefreshAutoSync,
@@ -81,7 +82,11 @@ export default function WorkspaceLanding({
                   <article className="message-row assistant">
                     <div className="message-bubble assistant">
                       <p className="message-label">{answerEyebrowForMode(turn.mode)}</p>
-                      <ChatMarkdown text={turn.text} />
+                      <AnswerPresentation
+                        text={turn.text}
+                        mode={turn.mode}
+                        format={outputPreference}
+                      />
                     </div>
                   </article>
                 )}
