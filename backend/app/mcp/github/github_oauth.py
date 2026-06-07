@@ -39,6 +39,8 @@ def get_github_login_url(user_key: str):
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": "read:user repo",
+            # Ask GitHub to show the account chooser so users can pick the right login.
+            "prompt": "select_account",
             # Keep the state token exact; it is an opaque value used to restore the user context.
             "state": (user_key or "demo").strip(),
             "allow_signup": "true",

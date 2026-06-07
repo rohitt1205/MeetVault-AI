@@ -19,6 +19,7 @@ class MCPManager:
                 {"name": "get_github_issues", "description": "Fetches open GitHub issues assigned to the authenticated user.", "parameters": {"type": "object", "properties": {}}},
                 {"name": "get_github_prs", "description": "Fetches open GitHub pull requests created by the user.", "parameters": {"type": "object", "properties": {}}},
                 {"name": "get_github_reviews", "description": "Fetches pull requests awaiting review by the user.", "parameters": {"type": "object", "properties": {}}},
+                {"name": "get_github_repositories", "description": "Fetches repositories the authenticated user can access.", "parameters": {"type": "object", "properties": {}}},
             ],
             "jira": [
                 {"name": "get_jira_tickets", "description": "Fetches Jira issues and tasks assigned to the authenticated user.", "parameters": {"type": "object", "properties": {}}},
@@ -205,6 +206,8 @@ class MCPManager:
             email=session["email"],
             domain=session["domain"],
             token=session["token"],
+            account_id=session.get("account_id"),
+            display_name=session.get("display_name"),
         )
 
     # Slack connection methods
@@ -366,7 +369,7 @@ class MCPManager:
         return True
 
     @staticmethod
-    def execute_tool(
+    def _execute_tool_inner(
         provider: str,
         tool_name: str,
         arguments: dict,
@@ -402,6 +405,9 @@ class MCPManager:
             elif tool_name == "get_github_reviews":
                 from app.mcp.github import github_connector
                 return github_connector.fetch_pending_reviews(token)
+            elif tool_name == "get_github_repositories":
+                from app.mcp.github import github_connector
+                return github_connector.fetch_repositories(token)
 
         # Slack
         if provider == "slack" and tool_name == "get_slack_mentions":
@@ -462,3 +468,30 @@ class MCPManager:
             return gmail_connector.fetch_unread_messages(token)
 
         raise Exception(f"Tool {tool_name} for provider {provider} not found.")
+
+    @staticmethod
+    def execute_tool(
+        provider: str,
+        tool_name: str,
+        arguments: dict,
+        user_key: str,
+        graph_jwt: str | None = None,
+        supabase_jwt: str | None = None,
+    ):
+        import json
+        print(f"\n--- [DEBUG] MCPManager.execute_tool START ---")
+        print(f"Provider: {provider} | Tool: {tool_name}")
+        print(f"Arguments: {arguments}")
+        try:
+            res = MCPManager._execute_tool_inner(provider, tool_name, arguments, user_key, graph_jwt, supabase_jwt)
+            try:
+                res_str = json.dumps(res)[:1000]
+            except Exception:
+                res_str = str(res)[:1000]
+            print(f"Result (truncated): {res_str}")
+            print(f"--- [DEBUG] MCPManager.execute_tool END ---\n")
+            return res
+        except Exception as e:
+            print(f"ERROR in execute_tool: {e}")
+            print(f"--- [DEBUG] MCPManager.execute_tool END ---\n")
+            raise

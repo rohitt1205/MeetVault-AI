@@ -63,7 +63,10 @@ def build_login_url(provider: str, state: str) -> str:
         cfg = _required_env("Slack", ["SLACK_CLIENT_ID"])
         user_scopes = os.getenv(
             "SLACK_USER_OAUTH_SCOPES",
-            os.getenv("SLACK_OAUTH_SCOPES", "users:read users:read.email search:read"),
+            os.getenv(
+                "SLACK_OAUTH_SCOPES",
+                "users:read users:read.email search:read channels:read groups:read im:read mpim:read channels:history groups:history im:history mpim:history",
+            ),
         ).replace(",", " ")
         params = urlencode(
             {

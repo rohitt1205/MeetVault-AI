@@ -119,6 +119,17 @@ SALESFORCE_KEYWORDS = {
     "pipeline",
 }
 
+EXPLICIT_PROVIDER_TOKENS = {
+    "jira": {"jira"},
+    "github": {"github", "repo", "repos", "repository", "repositories", "pull request", "pull requests", "pr", "prs", "review", "reviews", "issue", "issues"},
+    "slack": {"slack"},
+    "outlook": {"outlook"},
+    "calendar": {"calendar"},
+    "salesforce": {"salesforce"},
+    "notion": {"notion"},
+    "gmail": {"gmail"},
+}
+
 NOT_FOUND_ANSWER = "Information not found in the provided context."
 
 
@@ -382,11 +393,16 @@ def _detect_tool_calls_fallback(
     query_tokens = _tokens(query)
     is_work_summary = query.strip().lower() == "summarize my work today"
     
+    explicit_providers = _explicit_provider_hints(query)
+    
     matched = []
     for tool in active_tools:
         provider = tool["provider"]
         tool_name = tool["name"]
         
+        if explicit_providers and provider.replace("mcp:", "", 1) not in explicit_providers:
+            continue
+            
         if is_work_summary:
             matched.append({"provider": provider, "tool_name": tool_name, "arguments": {}})
             continue
@@ -411,6 +427,99 @@ def _detect_tool_calls_fallback(
     return matched
 
 
+def _explicit_provider_hints(query: str) -> set[str]:
+    lowered = (query or "").lower()
+    query_tokens = _tokens(query)
+    hints = set()
+
+    # Explicit provider mentions always win.
+    for provider, tokens in EXPLICIT_PROVIDER_TOKENS.items():
+        if query_tokens & tokens:
+            hints.add(provider)
+
+    # Natural-language service hints when the provider name itself is omitted.
+    jira_hints = (
+        "assigned to me" in lowered
+        or "my tickets" in lowered
+        or "my ticket" in lowered
+        or "jira ticket" in lowered
+        or "jira tickets" in lowered
+        or "jira issue" in lowered
+        or "jira issues" in lowered
+        or "due date" in lowered
+        or "deadline" in lowered
+    )
+    github_hints = (
+        "repo" in lowered
+        or "repos" in lowered
+        or "repository" in lowered
+        or "repositories" in lowered
+        or "pull request" in lowered
+        or "pull requests" in lowered
+        or " pr" in f" {lowered}"
+        or "prs" in lowered
+        or "review" in lowered
+        or "issues" in lowered
+        or "issue" in lowered
+    )
+    slack_hints = (
+        "slack message" in lowered
+        or "slack messages" in lowered
+        or "slack mention" in lowered
+        or "slack mentions" in lowered
+        or "thread" in lowered
+        or "chat" in lowered
+    )
+    outlook_hints = (
+        "email" in lowered
+        or "emails" in lowered
+        or "mail" in lowered
+        or "inbox" in lowered
+    )
+    calendar_hints = (
+        "calendar" in lowered
+        or "meeting" in lowered
+        or "meetings" in lowered
+        or "schedule" in lowered
+        or "appointment" in lowered
+    )
+    salesforce_hints = (
+        "salesforce" in lowered
+        or "lead" in lowered
+        or "opportunity" in lowered
+        or "pipeline" in lowered
+    )
+
+    if not hints:
+        if jira_hints and "github" not in lowered:
+            hints.add("jira")
+        elif slack_hints:
+            hints.add("slack")
+        elif github_hints:
+            hints.add("github")
+        elif outlook_hints:
+            hints.add("outlook")
+        elif calendar_hints:
+            hints.add("calendar")
+        elif salesforce_hints:
+            hints.add("salesforce")
+
+    return hints
+
+
+def _filter_tool_calls_by_provider(
+    tool_calls: list[dict],
+    providers: set[str],
+) -> list[dict]:
+    if not providers:
+        return tool_calls
+    return [
+        call
+        for call in tool_calls
+        if (call.get("provider") or "").replace("mcp:", "", 1) in providers
+    ]
+
+
 def _get_mcp_context(
     user_query: str,
     user_key: str,
@@ -424,10 +533,17 @@ def _get_mcp_context(
     
     from app.mcp.tool_registry import MCPToolRegistry
     active_tools = MCPToolRegistry.get_active_tools(user_key, supabase_jwt)
+    explicit_providers = _explicit_provider_hints(user_query)
     
-    tool_calls = _detect_tool_calls_with_llm(user_query, active_tools)
-    if not tool_calls:
-        tool_calls = _detect_tool_calls_fallback(user_query, active_tools)
+    if explicit_providers:
+        tool_calls = _detect_tool_calls_with_llm(user_query, active_tools)
+        if not tool_calls:
+            tool_calls = _detect_tool_calls_fallback(user_query, active_tools)
+        tool_calls = _filter_tool_calls_by_provider(tool_calls, explicit_providers)
+    else:
+        tool_calls = _detect_tool_calls_with_llm(user_query, active_tools)
+        if not tool_calls:
+            tool_calls = _detect_tool_calls_fallback(user_query, active_tools)
         
     context_parts = []
     mcp_sources = []
@@ -455,7 +571,9 @@ def _get_mcp_context(
             if provider == "jira" and tool_name == "get_jira_tickets":
                 if isinstance(result, list) and result:
                     ticket_str = "\n".join(
-                        f"- [{t['ticket_id']}] {t['summary']} (Status: {t['status']})"
+                        f"- [{t['ticket_id']}] {t['summary']} (Status: {t['status']}"
+                        + (f", Due: {t['due_date']}" if t.get("due_date") else "")
+                        + ")"
                         for t in result
                     )
                     formatted_text = f"### Jira Tasks Assigned to Me:\n{ticket_str}"
@@ -484,6 +602,13 @@ def _get_mcp_context(
                         )
                     else:
                         formatted_text = "### GitHub PRs Awaiting Review:\nNo pending reviews."
+                elif tool_name == "get_github_repositories":
+                    if isinstance(result, list) and result:
+                        formatted_text = "### GitHub Repositories:\n" + "\n".join(
+                            f"- {repo['full_name']} ({repo['url']})" for repo in result
+                        )
+                    else:
+                        formatted_text = "### GitHub Repositories:\nNo accessible repositories found."
                         
             elif provider == "slack" and tool_name == "get_slack_mentions":
                 if isinstance(result, list) and result:
@@ -611,6 +736,7 @@ def retrieve_and_answer(
     """
     Retrieves relevant transcript chunks from ChromaDB and generates a grounded answer.
     """
+    explicit_providers = _explicit_provider_hints(user_query)
     mcp_context, mcp_sources, is_work_summary = _get_mcp_context(
         user_query,
         user_key,
@@ -705,6 +831,31 @@ def retrieve_and_answer(
     )
 
     all_sources = [*sources, *mcp_sources]
+
+    if explicit_providers and mcp_context:
+        safe_query = user_query.replace("{", "{{").replace("}", "}}")
+        final_prompt = RAG_SYSTEM_PROMPT.format(
+            context=mcp_context,
+            query=safe_query,
+        )
+        llm_error = None
+        try:
+            answer = generate_answer(
+                final_prompt, query=user_query, context=mcp_context
+            )
+            answer_mode = "mcp_only_answer"
+        except Exception as exc:
+            llm_error = str(exc)
+            answer = f"I found the following tool context:\n\n{mcp_context}"
+            answer_mode = "mcp_only_fallback"
+
+        return {
+            "query": user_query,
+            "answer": answer,
+            "answer_mode": answer_mode,
+            "llm_error": llm_error,
+            "sources": mcp_sources,
+        }
 
     if not all_sources:
         return {

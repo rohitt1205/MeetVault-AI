@@ -11,22 +11,32 @@ def _headers(token: str) -> dict:
 
 def fetch_assigned_issues(token: str, limit: int = 5) -> list[dict]:
     """Fetches open GitHub issues assigned to the authenticated user."""
-    url = "https://api.github.com/issues"
-    params = {
-        "filter": "assigned",
-        "state": "open",
-        "per_page": limit,
-    }
     try:
+        user_response = requests.get(
+            "https://api.github.com/user",
+            headers=_headers(token),
+            timeout=10,
+        )
+        if not user_response.ok:
+            return []
+        username = user_response.json().get("login")
+        if not username:
+            return []
+
+        url = "https://api.github.com/search/issues"
+        params = {
+            "q": f"is:issue is:open assignee:{username}",
+            "per_page": limit,
+        }
         response = requests.get(url, headers=_headers(token), params=params, timeout=15)
         if not response.ok:
             return []
-        issues = response.json()
+        issues = response.json().get("items", [])
         return [
             {
                 "issue_id": issue.get("number"),
                 "title": issue.get("title"),
-                "repo": issue.get("repository", {}).get("name", "Unknown Repo"),
+                "repo": (issue.get("repository_url") or "").rstrip("/").split("/")[-1] or "Unknown Repo",
                 "url": issue.get("html_url"),
                 "status": issue.get("state"),
             }

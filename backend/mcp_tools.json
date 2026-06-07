@@ -49,6 +49,15 @@
           "properties": {}
         },
         "status": "active"
+      },
+      {
+        "name": "get_github_repositories",
+        "description": "Fetches repositories the authenticated user can access.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
       }
     ],
     "calendar": [

@@ -105,6 +105,8 @@ class MCPConnectionStore:
                         "access_token": row.get("access_token"),
                         "refresh_token": row.get("refresh_token"),
                         "expires_at": row.get("expires_at"),
+                        "display_name": row.get("display_name"),
+                        "account_id": row.get("account_id"),
                     }
                     if provider == "github":
                         session["username"] = row.get("provider_user_id")
@@ -112,6 +114,19 @@ class MCPConnectionStore:
                         session["email"] = row.get("provider_user_id")
                         session["token"] = row.get("access_token")
                         session["domain"] = row.get("refresh_token")
+                        if not session.get("account_id") or not session.get("display_name"):
+                            try:
+                                from app.mcp.jira import jira_connector
+                                enriched = jira_connector.verify_and_connect(
+                                    email=session["email"],
+                                    domain=session["domain"],
+                                    api_token=session["token"],
+                                    user_key="db",
+                                )
+                                session["account_id"] = enriched.get("account_id")
+                                session["display_name"] = enriched.get("display_name")
+                            except Exception:
+                                pass
                     elif provider in ("slack", "salesforce", "outlook", "calendar"):
                         session["email"] = row.get("provider_user_id")
                         session["token"] = row.get("access_token")
@@ -155,6 +170,8 @@ class MCPConnectionStore:
             "access_token": access_token,
             "refresh_token": refresh_token,
             "expires_at": session.get("expires_at"),
+            "display_name": session.get("display_name"),
+            "account_id": session.get("account_id"),
             "connected": session.get("connected", True),
             "updated_at": "now()",
         }
@@ -223,6 +240,8 @@ class MCPConnectionStore:
                             "provider_user_id": session.get("username") or session.get("email") or session.get("provider_user_id"),
                             "access_token": session.get("access_token") or session.get("token"),
                             "refresh_token": session.get("refresh_token") or session.get("domain"),
+                            "display_name": session.get("display_name"),
+                            "account_id": session.get("account_id"),
                         })
             return conns
 
