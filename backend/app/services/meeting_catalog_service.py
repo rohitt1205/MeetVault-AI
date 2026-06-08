@@ -92,20 +92,34 @@ class MeetingCatalogService:
         recording_event_ids = set(teams_source.get("recording_event_ids") or [])
         videos = onedrive_source.get("videos") or []
 
+        # We want to match OneDrive videos to calendar meetings if possible,
+        # keeping only videos that the user was invited to.
         matched_calendar_ids, unmatched_files = OneDriveService.match_recording_assets_to_meetings(
             meetings,
             {"transcripts": [], "videos": videos},
         )
+        recording_event_ids.update(matched_calendar_ids)
+
         matched_videos, unmatched_files = IngestionService._matched_drive_items_for_meetings(
             meetings,
             videos,
         )
-        recording_event_ids.update(matched_calendar_ids)
+
+        # To respect privacy and relevance, we include ALL meetings the user has access to
+        # (both calendar-matched AND explicitly shared/owned ad-hoc meetings), 
+        # BUT we filter out irrelevant organization-wide recordings that were only discovered 
+        # via broad Graph searches.
+        relevant_unmatched_videos = [
+            v for v in unmatched_files
+            if not v.get("_from_search")
+        ]
+        
+        final_videos = matched_videos + relevant_unmatched_videos
 
         revalidation = MeetingCatalogService.revalidate_stale_indices(
             meetings=meetings,
             recording_event_ids=recording_event_ids,
-            matched_onedrive_files=matched_videos,
+            matched_onedrive_files=final_videos,
         )
 
         teams_diagnostics = dict(teams_source.get("diagnostics") or {})
@@ -114,7 +128,7 @@ class MeetingCatalogService:
             **teams_diagnostics,
             **onedrive_diagnostics,
             "onedrive_matched_calendar_meetings": len(matched_calendar_ids),
-            "onedrive_catalog_entries": len(matched_videos),
+            "onedrive_catalog_entries": len(videos),
             "onedrive_unmatched_recording_assets": len(unmatched_files),
             "meetings_with_graph_recording_or_transcript": teams_diagnostics.get(
                 "meetings_with_graph_recording_or_transcript",
@@ -127,7 +141,7 @@ class MeetingCatalogService:
         return MeetingCatalogService._build_catalog(
             meetings=meetings,
             recording_event_ids=recording_event_ids,
-            onedrive_catalog_files=matched_videos,
+            onedrive_catalog_files=final_videos,
             discovery_diagnostics=discovery_diagnostics,
             sync_error=sync_error,
         )

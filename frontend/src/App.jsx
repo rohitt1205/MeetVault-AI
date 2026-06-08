@@ -547,7 +547,6 @@ function App() {
       cancelled = true
     }
   }, [userId])
->>>>>>> origin/main
 
   const userProfile = useMemo(() => {
     const metadata = user?.user_metadata || {}
@@ -1786,14 +1785,9 @@ function App() {
         autoSyncRegisteredTokenRef.current = ''
         setAutoSyncStatus(null)
         setAutoSyncError('')
-      } else {
+      } else if (event === 'SIGNED_IN') {
         const completed = localStorage.getItem('meetvault-onboarding-completed') === 'true'
         setShowOnboarding(!completed)
-        setOutputPreference('')
-        setHasPreferenceLoaded(false)
-        setIsPreferenceLoading(false)
-        setPreferenceSaving(false)
-        setPreferenceError('')
       }
       if (nextSession?.provider_token) {
         localStorage.setItem(GRAPH_TOKEN_STORAGE_KEY, nextSession.provider_token)

@@ -264,6 +264,67 @@ class RagPipelineTests(unittest.TestCase):
         self.assertLess(len(result["answer"]), 400)
         self.assertNotIn("YouTube had a chat", result["answer"])
 
+    def test_retrieve_and_answer_work_summary_uses_all_active_tools(self):
+        active_tools = [
+            {
+                "provider": "jira",
+                "name": "get_jira_tickets",
+                "description": "Fetch Jira tickets",
+                "parameters": {},
+                "status": "active",
+            },
+            {
+                "provider": "github",
+                "name": "get_github_repositories",
+                "description": "Fetch GitHub repositories",
+                "parameters": {},
+                "status": "active",
+            },
+        ]
+
+        with patch(
+            "app.mcp.tool_registry.MCPToolRegistry.get_active_tools",
+            return_value=active_tools,
+        ), patch(
+            "app.rag.retrieve.MCPManager.execute_tool",
+            side_effect=[
+                [
+                    {
+                        "ticket_id": "JIRA-1",
+                        "summary": "Fix login bug",
+                        "status": "In Progress",
+                    }
+                ],
+                [
+                    {
+                        "full_name": "org/repo",
+                        "url": "https://github.com/org/repo",
+                    }
+                ],
+            ],
+        ) as mock_execute_tool, patch(
+            "app.rag.retrieve.MCPManager.get_all_connections",
+            return_value={
+                "jira": {"connected": True},
+                "github": {"connected": True},
+                "slack": {"connected": False},
+                "outlook": {"connected": False},
+                "calendar": {"connected": False},
+                "salesforce": {"connected": False},
+            },
+        ), patch(
+            "app.rag.retrieve.generate_answer",
+            return_value="Work summary",
+        ) as mock_generate_answer:
+            result = retrieve_and_answer("summarize my work today")
+
+        self.assertEqual(result["answer_mode"], "work_summary")
+        self.assertEqual(mock_execute_tool.call_count, 2)
+        self.assertEqual(mock_execute_tool.call_args_list[0].args[1], "get_jira_tickets")
+        self.assertEqual(mock_execute_tool.call_args_list[1].args[1], "get_github_repositories")
+        self.assertIn("Jira Tasks Assigned to Me", mock_generate_answer.call_args.kwargs["context"])
+        self.assertIn("GitHub Repositories", mock_generate_answer.call_args.kwargs["context"])
+
 
 if __name__ == "__main__":
     unittest.main()

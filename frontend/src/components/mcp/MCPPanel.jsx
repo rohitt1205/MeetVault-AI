@@ -499,13 +499,22 @@ export default function MCPPanel({ token, supabaseToken, userEmail }) {
           {connections?.slack?.connected && renderToolBadges('slack')}
           <div style={footerStyle}>
             {connections?.slack?.connected ? (
-              <button 
-                onClick={() => handleDisconnect('slack')} 
-                className="ghost-button"
-                style={{ fontSize: '0.8rem', padding: '6px 12px' }}
-              >
-                Disconnect
-              </button>
+              <>
+                <button 
+                  onClick={() => handleDisconnect('slack')} 
+                  className="ghost-button"
+                  style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                >
+                  Disconnect
+                </button>
+                <button 
+                  onClick={() => handleOAuthConnect('slack')} 
+                  className="auth-button"
+                  style={{ fontSize: '0.8rem', padding: '6px 12px' }}
+                >
+                  Reconnect OAuth
+                </button>
+              </>
             ) : (
               <button 
                 onClick={() => handleOAuthConnect('slack')} 

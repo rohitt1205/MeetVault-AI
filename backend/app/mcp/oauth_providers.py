@@ -61,16 +61,25 @@ def build_login_url(provider: str, state: str) -> str:
 
     if provider == "slack":
         cfg = _required_env("Slack", ["SLACK_CLIENT_ID"])
-        user_scopes = os.getenv(
-            "SLACK_USER_OAUTH_SCOPES",
+        bot_scopes = os.getenv(
+            "SLACK_BOT_OAUTH_SCOPES",
             os.getenv(
                 "SLACK_OAUTH_SCOPES",
-                "users:read users:read.email search:read channels:read groups:read im:read mpim:read channels:history groups:history im:history mpim:history",
+                (
+                    "channels:read channels:history channels:join "
+                    "groups:read groups:history im:read im:history "
+                    "mpim:read mpim:history users:read"
+                ),
             ),
+        ).replace(",", " ")
+        user_scopes = os.getenv(
+            "SLACK_USER_OAUTH_SCOPES",
+            "users:read users:read.email",
         ).replace(",", " ")
         params = urlencode(
             {
                 "client_id": cfg["SLACK_CLIENT_ID"],
+                "scope": bot_scopes,
                 "user_scope": user_scopes,
                 "redirect_uri": _callback_url("slack"),
                 "state": normalized_state,
@@ -140,12 +149,17 @@ def exchange_callback(provider: str, code: str) -> dict:
         )
         if not data.get("ok"):
             raise HTTPException(status_code=502, detail=data.get("error") or "Slack OAuth failed.")
-        token = data.get("authed_user", {}).get("access_token") or data.get("access_token")
+        # Slack message-history scopes are granted to the bot token returned at the top level.
+        # Keep the optional user token for diagnostics/metadata, but store the bot token for reads.
+        bot_token = data.get("access_token")
+        user_token = data.get("authed_user", {}).get("access_token")
+        token = bot_token or user_token
         if not token:
             raise HTTPException(status_code=502, detail="Slack access token missing.")
         return {
             "connected": True,
             "access_token": token,
+            "refresh_token": user_token,
             "provider_user_id": data.get("authed_user", {}).get("id") or data.get("team", {}).get("id"),
             "display_name": data.get("team", {}).get("name"),
             "team": data.get("team", {}).get("name"),

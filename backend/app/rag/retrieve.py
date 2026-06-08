@@ -10,7 +10,7 @@ from app.mcp.salesforce import salesforce_connector
 from app.mcp.connection_store import MCPConnectionStore
 from app.rag.citations import build_citations
 from app.rag.llm import generate_answer, generate_conversational_answer
-from app.rag.prompts import CONVERSATIONAL_PROMPT, RAG_SYSTEM_PROMPT, WORK_SUMMARY_PROMPT, build_rag_prompt, normalize_output_format
+from app.rag.prompts import CONVERSATIONAL_PROMPT, WORK_SUMMARY_PROMPT, build_rag_prompt, normalize_output_format
 from app.services.answer_service import AnswerService
 from app.services.chroma_service import ChromaService, MICROSOFT_SOURCE_TYPES
 from app.services.embedding_service import EmbeddingService
@@ -557,8 +557,19 @@ def _get_mcp_context(
     from app.mcp.tool_registry import MCPToolRegistry
     active_tools = MCPToolRegistry.get_active_tools(user_key, supabase_jwt)
     explicit_providers = _explicit_provider_hints(user_query)
-    
-    if explicit_providers:
+
+    if is_work_summary:
+        # Work summaries should pull from every connected tool instead of waiting
+        # for the router to guess which providers are relevant.
+        tool_calls = [
+            {
+                "provider": tool["provider"],
+                "tool_name": tool["name"],
+                "arguments": {},
+            }
+            for tool in active_tools
+        ]
+    elif explicit_providers:
         tool_calls = _detect_tool_calls_with_llm(user_query, active_tools)
         if not tool_calls:
             tool_calls = _detect_tool_calls_fallback(user_query, active_tools)
@@ -819,11 +830,7 @@ def retrieve_and_answer(
 
     if not retrieved_documents:
         if mcp_context:
-            safe_query = user_query.replace("{", "{{").replace("}", "}}")
-            final_prompt = RAG_SYSTEM_PROMPT.format(
-                context=mcp_context,
-                query=safe_query,
-            )
+            final_prompt = build_rag_prompt(mcp_context, user_query, resolved_format)
             llm_error = None
             try:
                 answer = generate_answer(
@@ -870,11 +877,7 @@ def retrieve_and_answer(
     all_sources = [*sources, *mcp_sources]
 
     if explicit_providers and mcp_context:
-        safe_query = user_query.replace("{", "{{").replace("}", "}}")
-        final_prompt = RAG_SYSTEM_PROMPT.format(
-            context=mcp_context,
-            query=safe_query,
-        )
+        final_prompt = build_rag_prompt(mcp_context, user_query, resolved_format)
         llm_error = None
         try:
             answer = generate_answer(

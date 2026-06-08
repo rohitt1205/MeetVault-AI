@@ -126,7 +126,7 @@ def resolve_tokens(
 
 @router.post("/oauth/context", response_model=OAuthContextResponse)
 def create_oauth_context(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -144,7 +144,7 @@ def create_oauth_context(
 
 @router.get("/connections")
 def get_connections(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -157,7 +157,7 @@ def get_connections(
 @router.post("/connections")
 def post_connections(
     req: GenericConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -297,7 +297,7 @@ def oauth_callback(
 @router.post("/jira/connect")
 def connect_jira(
     req: JiraConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -319,7 +319,7 @@ def connect_jira(
 @router.post("/slack/connect")
 def connect_slack(
     req: SlackConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -333,7 +333,7 @@ def connect_slack(
 @router.post("/salesforce/connect")
 def connect_salesforce(
     req: SalesforceConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -351,7 +351,7 @@ def connect_salesforce(
 @router.post("/custom/connect")
 def connect_custom_mcp(
     req: CustomMcpConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -363,7 +363,7 @@ def connect_custom_mcp(
 @router.post("/notion/connect")
 def connect_notion_endpoint(
     req: NotionGmailConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -375,7 +375,7 @@ def connect_notion_endpoint(
 @router.post("/gmail/connect")
 def connect_gmail_endpoint(
     req: NotionGmailConnectRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -386,7 +386,7 @@ def connect_gmail_endpoint(
 
 @router.get("/tools")
 def list_tools(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -397,7 +397,7 @@ def list_tools(
 @router.post("/tools/execute")
 def execute_tool_endpoint(
     req: ExecuteToolRequest,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)
@@ -500,7 +500,7 @@ def execute_tool_endpoint(
 @router.delete("/disconnect/{provider}")
 def disconnect_provider(
     provider: str,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     x_supabase_token: str | None = Header(None, alias="X-Supabase-Token"),
 ):
     user_key = get_user_key_from_header(authorization)

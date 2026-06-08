@@ -63,6 +63,35 @@ def fetch_upcoming_meetings(graph_jwt: str, limit: int = 5) -> list[dict]:
         return []
 
 
+def fetch_recent_meetings(graph_jwt: str, limit: int = 5) -> list[dict]:
+    """Fetches recent/past meetings from the last 14 days using Microsoft Graph calendarView."""
+    try:
+        now = datetime.utcnow()
+        start_time = now - timedelta(days=14)
+        
+        start_str = start_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        endpoint = (
+            f"/me/calendarView?startDateTime={start_str}&endDateTime={end_str}&"
+            f"$select=subject,start,end,organizer&$top={limit}&$orderby=start/dateTime desc"
+        )
+        res = GraphClient.get(endpoint, graph_jwt)
+        events = res.get("value", [])
+        return [
+            {
+                "subject": ev.get("subject", "No Subject"),
+                "organizer": ev.get("organizer", {}).get("emailAddress", {}).get("name", "Unknown"),
+                "start": ev.get("start", {}).get("dateTime"),
+                "end": ev.get("end", {}).get("dateTime"),
+            }
+            for ev in events
+        ]
+    except Exception as e:
+        print(f"Error fetching recent meetings: {e}")
+        return []
+
+
 def fetch_deadlines(graph_jwt: str, limit: int = 5) -> list[dict]:
     """Scans calendar events for subjects containing keywords indicating project/sprint deadlines."""
     try:

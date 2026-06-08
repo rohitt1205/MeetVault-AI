@@ -43,20 +43,14 @@ def verify_and_connect(token: str) -> dict:
             "provider_user_id": user_id or user_name,
         }
     except requests.RequestException as exc:
-        print(f"Slack authentication failed: {exc}. Falling back to mock connection.")
-        return {
-            "connected": True,
-            "display_name": "Mock Slack User (Offline)",
-            "user_id": "U123456",
-            "team": "Mock Team",
-            "access_token": token,
-            "provider_user_id": "U123456",
-        }
+        raise HTTPException(
+            status_code=502,
+            detail=f"Slack authentication failed: {exc}",
+        ) from exc
 
 
 def fetch_mentions(token: str, limit: int = 5) -> list[dict]:
     """Fetches recent Slack messages relevant to the current user."""
-    # Step 1: Call auth.test to get user ID
     auth_url = "https://slack.com/api/auth.test"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -71,10 +65,50 @@ def fetch_mentions(token: str, limit: int = 5) -> list[dict]:
         
         auth_data = auth_res.json()
         user_id = auth_data.get("user_id")
-        user_name = auth_data.get("user") or ""
         
         messages = []
         seen = set()
+        user_cache: dict[str, str] = {}
+        permission_errors = set()
+
+        def _api_get(url: str, params: dict | None = None) -> dict:
+            res = requests.get(url, headers=headers, params=params or {}, timeout=15)
+            try:
+                data = res.json()
+            except ValueError:
+                data = {"ok": False, "error": res.text}
+            if not res.ok:
+                data.setdefault("ok", False)
+                data.setdefault("error", res.text)
+            return data
+
+        def _api_post(url: str, payload: dict | None = None) -> dict:
+            res = requests.post(url, headers=headers, json=payload or {}, timeout=15)
+            try:
+                data = res.json()
+            except ValueError:
+                data = {"ok": False, "error": res.text}
+            if not res.ok:
+                data.setdefault("ok", False)
+                data.setdefault("error", res.text)
+            return data
+
+        def _display_user(slack_user_id: str | None) -> str:
+            if not slack_user_id:
+                return "Someone"
+            if slack_user_id in user_cache:
+                return user_cache[slack_user_id]
+
+            data = _api_get("https://slack.com/api/users.info", {"user": slack_user_id})
+            profile = ((data.get("user") or {}).get("profile") or {}) if data.get("ok") else {}
+            name = (
+                profile.get("display_name")
+                or profile.get("real_name")
+                or (data.get("user") or {}).get("name")
+                or slack_user_id
+            )
+            user_cache[slack_user_id] = name
+            return name
 
         def _push_message(msg: dict):
             key = (msg.get("channel", {}).get("name"), msg.get("ts"), msg.get("text"))
@@ -83,97 +117,114 @@ def fetch_mentions(token: str, limit: int = 5) -> list[dict]:
             seen.add(key)
             messages.append(msg)
 
-        # Step 2A: Search for direct mentions and user-name hits.
-        search_url = "https://slack.com/api/search.messages"
-        queries = [f"<@{user_id}>"]
-        if user_name and user_name not in queries:
-            queries.append(user_name)
+        conversations_url = "https://slack.com/api/conversations.list"
+        channel_groups = [
+            "public_channel",
+            "private_channel",
+            "im,mpim",
+        ]
 
-        for query in queries:
-            params = {
-                "query": query,
-                "count": limit,
-                "sort": "timestamp",
-                "sort_dir": "desc",
-            }
-            res = requests.get(search_url, headers=headers, params=params, timeout=15)
-            print(f"[DEBUG Slack] search messages status: {res.status_code} for query: {query}")
-            if not res.ok:
-                print(f"[DEBUG Slack] search messages failed: {res.text}")
-                continue
-
-            data = res.json()
-            if not data.get("ok"):
-                print(f"[DEBUG Slack] search messages returned ok=False: {data}")
-                continue
-
-            matches = data.get("messages", {}).get("matches", [])
-            print(f"[DEBUG Slack] search messages found {len(matches)} matches")
-            for msg in matches:
-                _push_message(msg)
-                if len(messages) >= limit:
-                    break
+        for channel_types in channel_groups:
             if len(messages) >= limit:
                 break
 
-        # Step 2B: If search is empty or too narrow, inspect recent channel history.
-        if len(messages) < limit:
-            print(f"[DEBUG Slack] messages found ({len(messages)}) < limit ({limit}), trying fallback channel history")
-            conversations_url = "https://slack.com/api/conversations.list"
-            channels_res = requests.get(
+            channels_data = _api_get(
                 conversations_url,
-                headers=headers,
-                params={
-                    "types": "public_channel,private_channel,im,mpim",
-                    "limit": 20,
+                {
+                    "types": channel_types,
+                    "limit": 100,
+                    "exclude_archived": True,
                 },
-                timeout=15,
             )
-            print(f"[DEBUG Slack] conversations.list status: {channels_res.status_code}")
-            if channels_res.ok and channels_res.json().get("ok"):
-                channels = channels_res.json().get("channels", [])
-                print(f"[DEBUG Slack] conversations.list found {len(channels)} channels")
-                for channel in channels:
-                    channel_id = channel.get("id")
-                    if not channel_id:
-                        continue
-                    history_res = requests.get(
-                        "https://slack.com/api/conversations.history",
-                        headers=headers,
-                        params={"channel": channel_id, "limit": 10},
-                        timeout=15,
+            print(
+                f"[DEBUG Slack] conversations.list types={channel_types} ok={channels_data.get('ok')} "
+                f"error={channels_data.get('error')} count={len(channels_data.get('channels', []))}"
+            )
+            if not channels_data.get("ok"):
+                if channels_data.get("error"):
+                    permission_errors.add(channels_data.get("error"))
+                continue
+
+            for channel in channels_data.get("channels", []):
+                if len(messages) >= limit:
+                    break
+
+                channel_id = channel.get("id")
+                if not channel_id:
+                    continue
+
+                channel_name = (
+                    channel.get("name")
+                    or channel.get("user")
+                    or channel_id
+                )
+                is_public = bool(channel.get("is_channel")) and not channel.get("is_group")
+                if is_public and not channel.get("is_member"):
+                    join_data = _api_post(
+                        "https://slack.com/api/conversations.join",
+                        {"channel": channel_id},
                     )
-                    print(f"[DEBUG Slack] history for channel {channel_id} status: {history_res.status_code}")
-                    if not history_res.ok:
-                        print(f"[DEBUG Slack] history failed: {history_res.text}")
+                    print(
+                        f"[DEBUG Slack] conversations.join channel={channel_id} ok={join_data.get('ok')} "
+                        f"error={join_data.get('error')}"
+                    )
+                    if join_data.get("ok"):
+                        channel = join_data.get("channel") or channel
+                    elif join_data.get("error") not in {"already_in_channel"}:
+                        if join_data.get("error"):
+                            permission_errors.add(join_data.get("error"))
                         continue
-                    history_data = history_res.json()
-                    if not history_data.get("ok"):
-                        print(f"[DEBUG Slack] history ok=False: {history_data}")
+
+                history_data = _api_get(
+                    "https://slack.com/api/conversations.history",
+                    {"channel": channel_id, "limit": 20},
+                )
+                print(
+                    f"[DEBUG Slack] conversations.history channel={channel_id} ok={history_data.get('ok')} "
+                    f"error={history_data.get('error')} count={len(history_data.get('messages', []))}"
+                )
+                if not history_data.get("ok"):
+                    if history_data.get("error"):
+                        permission_errors.add(history_data.get("error"))
+                    continue
+
+                for msg in history_data.get("messages", []):
+                    if msg.get("subtype") in {"channel_join", "channel_leave"}:
                         continue
-                    
-                    msgs = history_data.get("messages", [])
-                    print(f"[DEBUG Slack] history found {len(msgs)} messages in {channel_id}")
-                    for msg in msgs:
-                        if msg.get("subtype") in {"channel_join", "channel_leave"}:
-                            continue
-                        msg_copy = dict(msg)
-                        msg_copy["channel"] = {"name": channel.get("name") or channel.get("id")}
-                        _push_message(msg_copy)
-                        if len(messages) >= limit:
-                            break
+
+                    text = msg.get("text") or ""
+                    # Prefer direct mentions, but keep recent visible messages as useful context.
+                    mentions_current_user = bool(user_id and f"<@{user_id}>" in text)
+                    if not mentions_current_user and len(messages) >= max(1, limit // 2):
+                        continue
+
+                    msg_copy = dict(msg)
+                    msg_copy["channel"] = {"name": channel_name}
+                    _push_message(msg_copy)
                     if len(messages) >= limit:
                         break
+
+        if not messages and permission_errors:
+            detail = (
+                "Slack is connected, but this token cannot read the workspace messages. "
+                "Invite the Slack app/bot to the channels you want indexed, or reconnect Slack "
+                "with message-history scopes such as channels:history, groups:history, im:history, "
+                "and mpim:history."
+            )
+            print(f"[DEBUG Slack] no readable messages due to Slack errors: {sorted(permission_errors)}")
+            raise HTTPException(status_code=403, detail=detail)
 
         return [
             {
                 "channel": msg.get("channel", {}).get("name", "direct-message"),
-                "user": msg.get("username", "Someone"),
+                "user": msg.get("username") or _display_user(msg.get("user")),
                 "text": msg.get("text", ""),
                 "ts": msg.get("ts"),
             }
             for msg in messages
         ]
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error fetching Slack mentions: {e}")
         return []

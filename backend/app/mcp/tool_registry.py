@@ -2,12 +2,16 @@ import json
 import os
 import base64
 import requests
+from urllib.parse import quote
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 MCP_TOOL_REGISTRY_PATH = Path(
-    os.getenv("MCP_TOOL_REGISTRY_PATH", "./mcp_tools.json")
+    os.getenv(
+        "MCP_TOOL_REGISTRY_PATH",
+        Path(__file__).resolve().parents[2] / "mcp_tools.json",
+    )
 )
 
 SUPABASE_URL = os.getenv("VITE_SUPABASE_URL") or os.getenv("SUPABASE_URL")
@@ -174,7 +178,8 @@ class MCPToolRegistry:
         if supabase_jwt and SUPABASE_URL:
             user_id = MCPToolRegistry._extract_user_id(supabase_jwt)
             if user_id:
-                url = f"{SUPABASE_URL}/rest/v1/mcp_tools?user_id=eq.{user_id}&provider=eq.{provider}"
+                provider_filter = quote(provider, safe="")
+                url = f"{SUPABASE_URL}/rest/v1/mcp_tools?user_id=eq.{user_id}&provider=eq.{provider_filter}"
                 headers = MCPToolRegistry._get_db_headers(supabase_jwt)
                 try:
                     response = requests.delete(url, headers=headers, timeout=5)

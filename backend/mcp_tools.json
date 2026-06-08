@@ -11,17 +11,6 @@
         "status": "active"
       }
     ],
-    "slack": [
-      {
-        "name": "get_slack_mentions",
-        "description": "Fetches recent user mentions and messages from Slack.",
-        "parameters": {
-          "type": "object",
-          "properties": {}
-        },
-        "status": "active"
-      }
-    ],
     "github": [
       {
         "name": "get_github_issues",
@@ -53,6 +42,17 @@
       {
         "name": "get_github_repositories",
         "description": "Fetches repositories the authenticated user can access.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ],
+    "slack": [
+      {
+        "name": "get_slack_mentions",
+        "description": "Fetches recent user mentions and messages from Slack.",
         "parameters": {
           "type": "object",
           "properties": {}

@@ -1,0 +1,9 @@
+{
+  "jira": {
+    "demo": {
+      "connected": false,
+      "access_token": null,
+      "token": null
+    }
+  }
+}

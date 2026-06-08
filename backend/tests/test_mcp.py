@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from fastapi import HTTPException
 
 from app.mcp import connection_store
+from app.mcp import oauth_providers
 from app.mcp.github import github_oauth
 from app.mcp.jira import jira_connector
 from app.mcp.mcp_manager import MCPManager
@@ -58,17 +59,29 @@ class MCPTests(unittest.TestCase):
     def test_jira_fetch_uses_current_user_jql(self):
         response = Mock()
         response.ok = True
-        response.json.return_value = {"issues": []}
+        response.json.return_value = {
+            "issues": [
+                {
+                    "key": "SCRUM-1",
+                    "fields": {
+                        "summary": "Assigned task",
+                        "status": {"name": "To Do"},
+                        "assignee": {"displayName": "Dev"},
+                    },
+                }
+            ]
+        }
 
-        with patch("app.mcp.jira.jira_connector.requests.get", return_value=response) as mock_get:
+        with patch("app.mcp.jira.jira_connector.requests.post", return_value=response) as mock_post:
             jira_connector.fetch_tickets(
                 email="dev@example.com",
                 domain="team",
                 token="secret",
             )
 
-        params = mock_get.call_args.kwargs["params"]
-        self.assertIn("assignee = currentUser()", params["jql"])
+        body = mock_post.call_args.kwargs["json"]
+        self.assertIn("assignee = currentUser()", body["jql"])
+        self.assertIn("/rest/api/3/search/jql", mock_post.call_args.args[0])
 
     @patch("app.mcp.connection_store.requests.get")
     def test_database_connection_store(self, mock_get):
@@ -108,6 +121,53 @@ class MCPTests(unittest.TestCase):
         res = slack_connector.verify_and_connect("fake-token")
         self.assertTrue(res["connected"])
         self.assertEqual(res["display_name"], "slack-user")
+
+    @patch.dict("os.environ", {"SLACK_CLIENT_ID": "client", "SLACK_CLIENT_SECRET": "secret"}, clear=True)
+    @patch("app.mcp.oauth_providers.requests.post")
+    def test_slack_oauth_prefers_bot_token(self, mock_post):
+        mock_response = Mock()
+        mock_response.ok = True
+        mock_response.json.return_value = {
+            "ok": True,
+            "access_token": "xoxb-bot-token",
+            "authed_user": {"access_token": "xoxp-user-token", "id": "U12345"},
+            "team": {"id": "T12345", "name": "Slack Workspace"},
+        }
+        mock_post.return_value = mock_response
+
+        session = oauth_providers.exchange_callback("slack", "oauth-code")
+
+        self.assertEqual(session["access_token"], "xoxb-bot-token")
+        self.assertEqual(session["refresh_token"], "xoxp-user-token")
+        self.assertEqual(session["display_name"], "Slack Workspace")
+
+    @patch("app.mcp.slack.slack_connector.requests.get")
+    @patch("app.mcp.slack.slack_connector.requests.post")
+    def test_slack_fetch_reports_permission_problem(self, mock_post, mock_get):
+        auth_response = Mock()
+        auth_response.ok = True
+        auth_response.status_code = 200
+        auth_response.json.return_value = {
+            "ok": True,
+            "user": "meetvaultai",
+            "user_id": "U123",
+        }
+
+        list_response = Mock()
+        list_response.ok = True
+        list_response.json.return_value = {
+            "ok": False,
+            "error": "missing_scope",
+        }
+
+        mock_post.return_value = auth_response
+        mock_get.return_value = list_response
+
+        with self.assertRaises(HTTPException) as context:
+            slack_connector.fetch_mentions("fake-token")
+
+        self.assertEqual(context.exception.status_code, 403)
+        self.assertIn("cannot read", context.exception.detail)
 
     @patch("app.mcp.salesforce.salesforce_connector.requests.get")
     def test_salesforce_connect(self, mock_get):

@@ -91,7 +91,7 @@ export const mcpService = {
   },
 
   async disconnectProvider(provider, token, supabaseToken) {
-    const response = await fetch(`${API_BASE_URL}/mcp/disconnect/${provider}`, {
+    const response = await fetch(`${API_BASE_URL}/mcp/disconnect/${encodeURIComponent(provider)}`, {
       method: 'DELETE',
       headers: getHeaders(token, supabaseToken),
     });

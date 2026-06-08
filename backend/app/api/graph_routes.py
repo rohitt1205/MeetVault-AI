@@ -47,7 +47,7 @@ def get_graph_access_token(authorization: str | None = Header(None)) -> str:
 
 @router.get("/meetings/recent")
 def fetch_recent_meetings(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(10, ge=1, le=50),
 ):
     access_token = get_graph_access_token(authorization)
@@ -62,14 +62,14 @@ def fetch_recent_meetings(
 
 
 @router.get("/meetings/catalog")
-def get_meeting_catalog(authorization: str = Header(None)):
+def get_meeting_catalog(authorization: str | None = Header(None)):
     get_access_token(authorization)
     return MeetingCatalogService.get_catalog()
 
 
 @router.post("/meetings/catalog/discover/teams")
 def discover_teams_catalog(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(30, ge=1, le=50),
     scan_graph: bool = Query(
         False,
@@ -82,7 +82,7 @@ def discover_teams_catalog(
 
 @router.post("/meetings/catalog/discover/onedrive")
 def discover_onedrive_catalog(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     video_limit: int = Query(200, ge=1, le=500),
     payload: OnedriveDiscoverPayload | None = Body(default=None),
 ):
@@ -98,7 +98,7 @@ def discover_onedrive_catalog(
 @router.post("/meetings/catalog/merge")
 def merge_meeting_catalog(
     payload: CatalogMergePayload,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
 ):
     """
     Merge prior discover/teams and discover/onedrive payloads into the in-memory catalog.
@@ -109,7 +109,7 @@ def merge_meeting_catalog(
 
 @router.post("/meetings/catalog/sync")
 def sync_meeting_catalog(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(30, ge=1, le=50),
     scan_graph: bool = Query(
         False,
@@ -122,7 +122,7 @@ def sync_meeting_catalog(
 
 @router.get("/meetings/catalog/debug")
 def debug_meeting_resolution(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     event_id: str | None = Query(None, description="Calendar event id to test; defaults to latest Teams meeting"),
 ):
     """
@@ -216,7 +216,7 @@ def debug_meeting_resolution(
 @router.post("/ingestion/meetings/{event_id}")
 def ingest_meeting(
     event_id: str,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
 ):
     access_token = get_graph_access_token(authorization)
     return IngestionService.ingest_meeting(access_token, event_id)
@@ -225,7 +225,7 @@ def ingest_meeting(
 @router.post("/ingestion/meetings/{event_id}/start")
 def start_meeting_ingestion(
     event_id: str,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
 ):
     access_token = get_graph_access_token(authorization)
     return IngestionService.start_meeting_ingestion(access_token, event_id)
@@ -234,7 +234,7 @@ def start_meeting_ingestion(
 @router.delete("/ingestion/meetings/{meeting_id}")
 def delete_meeting_ingestion(
     meeting_id: str,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
 ):
     get_access_token(authorization)
     IngestionStateService.request_cancel(meeting_id)
@@ -251,7 +251,7 @@ def delete_meeting_ingestion(
 
 @router.post("/ingestion/recent")
 def ingest_recent_meetings(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(20, ge=1, le=50),
 ):
     access_token = get_graph_access_token(authorization)
@@ -260,7 +260,7 @@ def ingest_recent_meetings(
 
 @router.post("/ingestion/workspace-sync")
 def start_workspace_sync(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(20, ge=1, le=50),
 ):
     access_token = get_graph_access_token(authorization)
@@ -269,7 +269,7 @@ def start_workspace_sync(
 
 @router.post("/ingestion/auto-sync/register")
 def register_auto_workspace_sync(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(20, ge=1, le=50),
 ):
     access_token = get_graph_access_token(authorization)
@@ -277,14 +277,14 @@ def register_auto_workspace_sync(
 
 
 @router.get("/ingestion/auto-sync/status")
-def get_auto_workspace_sync_status(authorization: str = Header(None)):
+def get_auto_workspace_sync_status(authorization: str | None = Header(None)):
     get_access_token(authorization)
     return WorkspaceSyncPoller.status()
 
 
 @router.get("/ingestion/recording-assets")
 def discover_recording_assets(
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     limit: int = Query(20, ge=1, le=50),
     fast: bool = Query(True, description="Skip slow OneDrive scans; parallelize Graph lookups"),
 ):
@@ -297,7 +297,7 @@ def semantic_search(
     query: str = Query(..., min_length=1),
     meeting_id: str | None = Query(None),
     x_meeting_context: str | None = Header(None, alias="X-Meeting-Context"),
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
 ):
     get_access_token(authorization)
     scoped_meeting_id = meeting_id or x_meeting_context
@@ -336,7 +336,7 @@ def semantic_search(
 
 
 @router.get("/ingestion/status/{meeting_id}")
-def get_ingestion_status(meeting_id: str, authorization: str = Header(None)):
+def get_ingestion_status(meeting_id: str, authorization: str | None = Header(None)):
     get_access_token(authorization)
     if ChromaService.has_meeting_embeddings(meeting_id):
         status = IngestionStateService.get_status(meeting_id)
@@ -353,13 +353,13 @@ def get_ingestion_status(meeting_id: str, authorization: str = Header(None)):
 
 
 @router.get("/ingestion/status")
-def get_all_ingestion_statuses(authorization: str = Header(None)):
+def get_all_ingestion_statuses(authorization: str | None = Header(None)):
     get_access_token(authorization)
     return IngestionStateService.get_all_statuses()
 
 
 @router.get("/ingestion/workspace-status")
-def get_workspace_sync_status(authorization: str = Header(None)):
+def get_workspace_sync_status(authorization: str | None = Header(None)):
     get_access_token(authorization)
     return IngestionStateService.get_workspace_sync_status()
 
@@ -367,7 +367,7 @@ def get_workspace_sync_status(authorization: str = Header(None)):
 @router.get("/notifications/meetings/{meeting_id}/status")
 def get_post_meeting_notification_status(
     meeting_id: str,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
 ):
     get_access_token(authorization)
     return PostMeetingNotificationService.status_for_meeting(meeting_id)
@@ -376,7 +376,7 @@ def get_post_meeting_notification_status(
 @router.post("/notifications/meetings/{meeting_id}/send")
 def send_post_meeting_notification(
     meeting_id: str,
-    authorization: str = Header(None),
+    authorization: str | None = Header(None),
     title: str | None = Query(None, description="Optional fallback meeting title."),
 ):
     access_token = get_graph_access_token(authorization)
@@ -388,13 +388,13 @@ def send_post_meeting_notification(
 
 
 @router.get("/vector-store/status")
-def get_vector_store_status(authorization: str = Header(None)):
+def get_vector_store_status(authorization: str | None = Header(None)):
     get_access_token(authorization)
     return ChromaService.get_status()
 
 
 @router.delete("/vector-store/reset")
-def reset_vector_store(authorization: str = Header(None)):
+def reset_vector_store(authorization: str | None = Header(None)):
     get_access_token(authorization)
     chroma_result = ChromaService.clear_all_documents()
     state_result = IngestionStateService.clear_all()
@@ -408,6 +408,6 @@ def reset_vector_store(authorization: str = Header(None)):
 
 
 @router.get("/auth/diagnostics")
-def get_auth_diagnostics(authorization: str = Header(None)):
+def get_auth_diagnostics(authorization: str | None = Header(None)):
     access_token = get_access_token(authorization)
     return TokenDiagnosticsService.inspect(access_token)

@@ -452,6 +452,7 @@ class OneDriveService:
             normalized = OneDriveService._normalize_search_item(
                 OneDriveService._normalize_shared_item(item),
             )
+            normalized["_from_search"] = True
             normalized_hits.append(normalized)
 
         videos = [item for item in normalized_hits if OneDriveService._is_video_asset(item)]

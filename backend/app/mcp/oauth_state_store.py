@@ -7,7 +7,10 @@ from threading import Lock
 
 
 MCP_OAUTH_STATE_STORE_PATH = Path(
-    os.getenv("MCP_OAUTH_STATE_STORE_PATH", "./mcp_oauth_states.json")
+    os.getenv(
+        "MCP_OAUTH_STATE_STORE_PATH",
+        Path(__file__).resolve().parents[2] / "mcp_oauth_states.json",
+    )
 )
 MCP_OAUTH_STATE_TTL_MINUTES = int(os.getenv("MCP_OAUTH_STATE_TTL_MINUTES", "30"))
 

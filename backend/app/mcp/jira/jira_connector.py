@@ -110,76 +110,76 @@ def fetch_tickets(
             "assignee": (fields.get("assignee") or {}).get("displayName"),
         }
 
-    url = f"https://{domain}.atlassian.net/rest/api/3/search"
-    current_user_params = {
-        "jql": "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
-        "maxResults": 50,
-        "startAt": 0,
-        "fields": "summary,status,assignee,duedate,project",
-    }
+    url = f"https://{domain}.atlassian.net/rest/api/3/search/jql"
+    fields = ["summary", "status", "assignee", "duedate", "project"]
 
-    try:
-        response = requests.get(
-            url,
-            params=current_user_params,
-            auth=HTTPBasicAuth(email, token),
-            headers={"Accept": "application/json"},
-            timeout=15,
-        )
-        print(f"[DEBUG Jira] current_user search status: {response.status_code}")
-        if response.ok:
-            data = response.json()
-            direct_issues = data.get("issues", [])
-            print(f"[DEBUG Jira] current_user search found {len(direct_issues)} issues")
-            if direct_issues:
-                res = [_format_issue(issue) for issue in direct_issues]
-                print(f"[DEBUG Jira] returning {len(res)} direct issues")
-                return res
-        else:
-            print(f"[DEBUG Jira] current_user search failed: {response.text}")
-    except requests.RequestException as exc:
-        print(f"[DEBUG Jira] current_user search exception: {exc}")
+    def _search_issues(jql: str, *, limit: int = 100) -> list[dict]:
+        issues: list[dict] = []
+        next_page_token = None
 
-    fallback_params = {
-        "jql": "statusCategory != Done ORDER BY updated DESC",
-        "maxResults": 50,
-        "startAt": 0,
-        "fields": "summary,status,assignee,duedate,project",
-    }
+        while len(issues) < limit:
+            body = {
+                "jql": jql,
+                "maxResults": min(50, limit - len(issues)),
+                "fields": fields,
+            }
+            if next_page_token:
+                body["nextPageToken"] = next_page_token
 
-    issues: list[dict] = []
-    total = None
-
-    try:
-        while True:
-            response = requests.get(
+            response = requests.post(
                 url,
-                params=fallback_params,
+                json=body,
                 auth=HTTPBasicAuth(email, token),
-                headers={"Accept": "application/json"},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
                 timeout=15,
             )
-            print(f"[DEBUG Jira] fallback search status: {response.status_code}")
+            print(f"[DEBUG Jira] search/jql status: {response.status_code} for jql: {jql}")
             if not response.ok:
-                print(f"[DEBUG Jira] fallback search failed: {response.text}")
+                print(f"[DEBUG Jira] search/jql failed: {response.text}")
                 return []
 
             data = response.json()
             page_issues = data.get("issues", [])
-            print(f"[DEBUG Jira] fallback search returned {len(page_issues)} issues on this page")
+            print(f"[DEBUG Jira] search/jql returned {len(page_issues)} issues on this page")
             issues.extend(page_issues)
-            total = data.get("total", total)
 
-            if not page_issues or len(issues) >= 100:
+            next_page_token = data.get("nextPageToken")
+            if not page_issues or not next_page_token or data.get("isLast") is True:
                 break
 
-            fallback_params["startAt"] = fallback_params["startAt"] + len(page_issues)
-            if total is not None and fallback_params["startAt"] >= total:
-                break
+        return issues
+
+    try:
+        direct_issues = _search_issues(
+            "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC",
+            limit=50,
+        )
+        if direct_issues:
+            res = [_format_issue(issue) for issue in direct_issues]
+            print(f"[DEBUG Jira] returning {len(res)} direct issues")
+            return res
+
+        if account_id:
+            account_issues = _search_issues(
+                f'assignee = "{account_id}" AND statusCategory != Done ORDER BY updated DESC',
+                limit=50,
+            )
+            if account_issues:
+                res = [_format_issue(issue) for issue in account_issues]
+                print(f"[DEBUG Jira] returning {len(res)} account-id issues")
+                return res
+
+        fallback_issues = _search_issues(
+            "statusCategory != Done ORDER BY updated DESC",
+            limit=100,
+        )
     except requests.RequestException as exc:
-        print(f"[DEBUG Jira] fallback search exception: {exc}")
+        print(f"[DEBUG Jira] search exception: {exc}")
         return []
 
-    final_res = [_format_issue(issue) for issue in issues if _matches_assignee(issue)]
-    print(f"[DEBUG Jira] returning {len(final_res)} filtered issues from fallback out of {len(issues)} total fetched")
+    final_res = [_format_issue(issue) for issue in fallback_issues if _matches_assignee(issue)]
+    print(f"[DEBUG Jira] returning {len(final_res)} filtered issues from fallback out of {len(fallback_issues)} total fetched")
     return final_res

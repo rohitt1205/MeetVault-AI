@@ -2,12 +2,16 @@ import json
 import os
 import base64
 import requests
+from urllib.parse import quote
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
 MCP_CONNECTION_STORE_PATH = Path(
-    os.getenv("MCP_CONNECTION_STORE_PATH", "./mcp_connections.json")
+    os.getenv(
+        "MCP_CONNECTION_STORE_PATH",
+        Path(__file__).resolve().parents[2] / "mcp_connections.json",
+    )
 )
 
 # Load Supabase URL & Key from environment
@@ -82,7 +86,8 @@ class MCPConnectionStore:
         if not user_id:
             return None
 
-        url = f"{SUPABASE_URL}/rest/v1/mcp_connections?user_id=eq.{user_id}&provider=eq.{provider}"
+        provider_filter = quote(provider, safe="")
+        url = f"{SUPABASE_URL}/rest/v1/mcp_connections?user_id=eq.{user_id}&provider=eq.{provider_filter}"
         headers = MCPConnectionStore._get_db_headers(supabase_jwt)
         try:
             response = requests.get(url, headers=headers, timeout=10)
@@ -194,7 +199,8 @@ class MCPConnectionStore:
         if not user_id:
             return False
 
-        url = f"{SUPABASE_URL}/rest/v1/mcp_connections?user_id=eq.{user_id}&provider=eq.{provider}"
+        provider_filter = quote(provider, safe="")
+        url = f"{SUPABASE_URL}/rest/v1/mcp_connections?user_id=eq.{user_id}&provider=eq.{provider_filter}"
         headers = MCPConnectionStore._get_db_headers(supabase_jwt)
         payload = {
             "access_token": None,

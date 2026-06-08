@@ -1,0 +1,15 @@
+{
+  "dev@example.com": {
+    "jira": [
+      {
+        "name": "get_jira_tickets",
+        "description": "Fetches Jira issues and tasks assigned to the authenticated user.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        },
+        "status": "active"
+      }
+    ]
+  }
+}
